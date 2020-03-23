@@ -122,6 +122,13 @@ class SCLProbabilityCoefficients(SCLTask):
                 ]
         return self._grids
 
+    def tri(self, dem, scale):
+        neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
+        diff = dem.subtract(neighbors)
+        sq = diff.multiply(diff)
+        tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
+        return tri
+
     # Currently this just gets the mean of each covariate within each grid cell (based on self.scale = 1km)
     # Probably we need more sophisticated covariate definitions (mode of rounded cell vals?)
     # or to sample using smaller gridcell geometries
@@ -140,12 +147,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
         structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
         hii, hii_date = self.get_most_recent_image(hii_ic)
-
-        neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
-        diff = dem.subtract(neighbors)
-        sq = diff.multiply(diff)
-        tri = sq.reduce("sum").sqrt().reproject("EPSG:4326", None, 90)  # assumes 90m SRTM
-
+        tri = self.tri(dem, 90)
         distance_to_roads = roads.distance().clipToCollection(cell_features)
 
         if structural_habitat and hii:
