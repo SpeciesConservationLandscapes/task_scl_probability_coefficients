@@ -144,7 +144,7 @@ class SCLProbabilityCoefficients(SCLTask):
         neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
         diff = dem.subtract(neighbors)
         sq = diff.multiply(diff)
-        tri = sq.reduce("sum").sqrt()
+        tri = sq.reduce("sum").sqrt().reproject("EPSG:4326", None, 90)  # assumes 90m SRTM
 
         distance_to_roads = roads.distance().clipToCollection(cell_features)
 
@@ -159,7 +159,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 collection=cell_features,
                 reducer=ee.Reducer.mean(),
                 scale=self.scale,
-                crs=ee.Projection("EPSG:5070"),  # temporary equal - area solution
+                crs=self.crs
             )
             return fc2df(covariates_fc)
         else:
