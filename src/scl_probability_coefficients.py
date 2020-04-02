@@ -53,7 +53,8 @@ class SCLProbabilityCoefficients(SCLTask):
         )
 
         self._df_adhoc = None
-        self._df_ct = None
+        self._df_ct_dep = None
+        self._df_ct_obs = None
         self._df_ss = None
         self._grids = {}
 
@@ -75,10 +76,10 @@ class SCLProbabilityCoefficients(SCLTask):
     # could skip dataframes and go directly to numpy arrays, or use
     # https://pandas.pydata.org/pandas-docs/version/0.24.0rc1/api/generated/pandas.Series.to_numpy.html
     # depends on calculation needs
+    # TODO: account for species
     @property
     def df_adhoc(self):
         if self._df_adhoc is None:
-            # TODO: account for species
             query = (
                 f"SELECT * FROM dbo.vw_CI_AdHocObservation "
                 f"WHERE DATEDIFF(YEAR, ObservationDate, {self.taskdate}) <= {self.inputs['obs_adhoc']['maxage']}"
@@ -86,27 +87,45 @@ class SCLProbabilityCoefficients(SCLTask):
             self._df_adhoc = pd.read_sql(query, self.obsconn)
         return self._df_adhoc
 
-    # TODO: define structure of df_adhoc, df_ct, and df_ss, so we know how to write the sql for the views
-    # @property
-    # def df_ct(self):
-    #     if self._df_ct is None:
-    #         query = "SELECT * FROM dbo.vw_CI_CameraTrapObservation"
-    #         self._df_ct = pd.read_sql(query, self.obsconn)
-    #     return self._df_ct
-    #
-    # @property
-    # def df_ss(self):
-    #     if self._df_ss is None:
-    #         query = "SELECT * FROM dbo.vw_CI_SignSurveyObservation"
-    #         self._df_ss = pd.read_sql(query, self.obsconn)
-    #     return self._df_ss
+    @property
+    def df_cameratrap_dep(self):
+        if self._df_ct_dep is None:
+            query = (
+                f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
+                f"WHERE DATEDIFF(YEAR, PickupDatetime, {self.taskdate}) <= {self.inputs['obs_ct']['maxage']}"
+            )
+            self._df_ct_dep = pd.read_sql(query, self.obsconn)
+        return self._df_ct_dep
+
+    @property
+    def df_cameratrap_obs(self):
+        if self._df_ct_obs is None:
+            query = (
+                f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
+                f"WHERE DATEDIFF(YEAR, ObservationDateTime, {self.taskdate}) <= {self.inputs['obs_ct']['maxage']}"
+            )
+            self._df_ct_obs = pd.read_sql(query, self.obsconn)
+        return self._df_ct_obs
+
+    @property
+    def df_signsurvey(self):
+        if self._df_ss is None:
+            query = (
+                f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
+                f"WHERE DATEDIFF(YEAR, StartDate, {self.taskdate}) <= {self.inputs['obs_ss']['maxage']}"
+            )
+            self._df_ss = pd.read_sql(query, self.obsconn)
+        return self._df_ss
 
     @property
     def grids(self):
         if len(self._grids) < 1:
-            # TODO: get unique grids from all observations, not just ad hoc
-            adhoc_gridvals = self.df_adhoc["Grid"].unique()
-            for gridname in adhoc_gridvals:
+            gridnames = set(
+                self.df_adhoc["GridName"].unique().tolist()
+                + self.df_cameratrap_dep["GridName"].unique().tolist()
+                + self.df_signsurvey["GridName"].unique().tolist()
+            )
+            for gridname in gridnames:
                 gridcells_query = (
                     f"SELECT CI_GridCellCode, Geom.STAsText() AS geom "
                     f"FROM CI_GridCell gc "
@@ -161,7 +180,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 collection=cell_features,
                 reducer=ee.Reducer.mean(),
                 scale=self.scale,
-                crs=self.crs
+                crs=self.crs,
             )
             return fc2df(covariates_fc)
         else:
@@ -169,6 +188,9 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def calc(self):
         print(self.df_adhoc)
+        print(self.df_cameratrap_dep)
+        print(self.df_cameratrap_obs)
+        print(self.df_signsurvey)
         for gridname in self.grids.keys():
             df_covars = self.get_covariates(gridname)
             print(df_covars)
