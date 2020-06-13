@@ -422,7 +422,7 @@ class SCLProbabilityCoefficients(SCLTask):
                     detections = int(
                         df_signsurvey[
                             df_signsurvey[self.cell_label].str.match(gridcellcode)
-                        ]["detections"]
+                        ]["detections"].sum()
                     )
                     if detections > 1:
                         detections = 1
