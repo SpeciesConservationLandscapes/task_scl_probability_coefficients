@@ -12,9 +12,6 @@ from geomet import wkt
 
 
 class SCLProbabilityCoefficients(SCLTask):
-    ee_rootdir = "projects/SCL/v1"
-    # TODO: account for species
-    ee_pocdir = "Panthera_tigris/geographies/Sumatra"
     inputs = {
         "obs_adhoc": {"maxage": 1},
         "obs_ss": {"maxage": 1},
@@ -42,9 +39,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.set_aoi_from_ee(
-            "{}/{}/sumatra_poc_aoi".format(self.ee_rootdir, self.species)
-        )
+        self.set_aoi_from_ee("projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi")  # temporary
 
         try:
             self.OBSDB_HOST = os.environ["OBSDB_HOST"]
@@ -118,7 +113,8 @@ class SCLProbabilityCoefficients(SCLTask):
             query = (
                 f"SELECT * FROM dbo.vw_CI_AdHocObservation "
                 f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
-                f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime)"
+                f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
+                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_adhoc = self._get_df(query)
         return self._df_adhoc
@@ -130,7 +126,8 @@ class SCLProbabilityCoefficients(SCLTask):
             query = (
                 f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
                 f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime)"
+                f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
+                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_ct_dep = pd.read_sql(query, self.obsconn)
         return self._df_ct_dep
@@ -141,7 +138,8 @@ class SCLProbabilityCoefficients(SCLTask):
             query = (
                 f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
                 f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime)"
+                f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
+                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_ct_obs = pd.read_sql(query, self.obsconn)
         return self._df_ct_obs
@@ -152,7 +150,8 @@ class SCLProbabilityCoefficients(SCLTask):
             query = (
                 f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
                 f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
-                f"AND StartDate <= Cast('{self.taskdate}' AS datetime)"
+                f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
+                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_ss = self._get_df(query)
         return self._df_ss
@@ -414,6 +413,7 @@ class SCLProbabilityCoefficients(SCLTask):
             temp, columns=[self.cell_label, "gridcells", "condprob"]
         )
 
+        # TODO: return 2 dataframes: 1) conditional, 2) ratio of conditional to unconditional
         return prob_out
 
     def calc(self):
@@ -422,7 +422,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
-            # print(self.df_adhoc)
+            print(self.df_adhoc)
             # print(self.df_signsurvey)
             # TODO: combine CT dep and obs dfs for prob functions
             # df_covars = self.get_covariates(gridname)
@@ -473,10 +473,10 @@ class SCLProbabilityCoefficients(SCLTask):
             #     .reduceToImage(["probability"], ee.Reducer.max())
             #     .rename("probability")
             # )
-            # self.export_image_ee(fake_prob, f"{self.ee_pocdir}/hab/probability")
+            # self.export_image_ee(fake_prob, "hab/probability")
 
         # TODO: add (? or otherwise combine) all probability images, one for each grid
-        # self.export_image_ee(combined_images, f"{self.ee_pocdir}/hab/probability")
+        # self.export_image_ee(combined_images, "hab/probability")
 
     def check_inputs(self):
         super().check_inputs()
@@ -486,6 +486,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--taskdate", default=datetime.now(timezone.utc).date())
     parser.add_argument("-s", "--species", default="Panthera_tigris")
+    parser.add_argument("--scenario", default=SCLTask.CANONICAL)
     options = parser.parse_args()
     sclprobcoeff_task = SCLProbabilityCoefficients(**vars(options))
     sclprobcoeff_task.run()
