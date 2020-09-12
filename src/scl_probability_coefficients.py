@@ -248,6 +248,8 @@ class SCLProbabilityCoefficients(SCLTask):
         #  self.presence_covar.columns + self.po_detection_covars.columns
         #  assuming those dfs are formatted correctly (see note in calc())
         param_guess = np.zeros(len(param_names))
+        # TODO: Make sure convergence, a different method might be needed (can be tested
+        # outside of task)
         fit_pbso = minimize(
             self.neg_log_likelihood_int,
             param_guess,
@@ -255,6 +257,7 @@ class SCLProbabilityCoefficients(SCLTask):
             options={"gtol": 1e-08},
         )
         se_pbso = np.zeros(len(fit_pbso.x))
+        # TODO: Output Standard Error of parameter estimates when convergence occurs
         # if fit_pbso.success==True:
         #    se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
         tmp = {
@@ -274,6 +277,8 @@ class SCLProbabilityCoefficients(SCLTask):
 
     # TODO: refactor par to use self.df_covars?
     # TODO: replace CT with self.df_* once we've figured out proper schema, and po_data with self.df_adhoc (see below)
+    # TODO: make sure neg_log_likelihood can account for no data, can have either sign or camera (must have at least 
+    # one of these), account for no adhoc data
     def neg_log_likelihood_int(self, par, CT, po_data):
         """Calculates the negative log-likelihood of the function.
          Par: array list of parameters to optimize
@@ -352,6 +357,7 @@ class SCLProbabilityCoefficients(SCLTask):
         return nll_po[0] + nll_so
 
     # TODO: DRY this up to avoid the repeated lines (should look like neg_log_likelihood_int after refactoring params)
+    # TODO: predict_surface must account for no data
     def predict_surface(self, par, CT, df_signsurvey, griddata):
         """Create predicted probability surface for each grid cell.
          Par: list of parameter values that have been optimized to convert to probability surface
@@ -401,20 +407,32 @@ class SCLProbabilityCoefficients(SCLTask):
         known_occurrences = list(set(one.append(two)))
 
         zeta[np.array(known_occurrences) - 1, 0] = 0
-        cond_psi = [zeta[i, 1] / sum(zeta[i,:]) for i in range(0, len(psi))]
+        cond_psi = [(np.exp(zeta[i, 1])) / (zeta[i,0]+np.exp(zeta[i,1])) for i in range(0, len(psi))]
 
-        cond_prob = 1.0 - (1.0 - np.exp(np.multiply(-1, cond_psi)))
+        # TODO: account for divide by zero
+        #ratio of conditional psi to unconditional psi
+        ratio_psi = [(cond_psi[i, 1])) / (zeta[i,0]) for i in range(0, len(psi))]
+
         gridcells = [i for i in range(1, len(psi) + 1)]
         temp = {
             self.cell_label: griddata[self.cell_label],
             "gridcells": gridcells,
-            "condprob": cond_prob,
+            "condprob": cond_psi,
         }
         prob_out = pd.DataFrame(
             temp, columns=[self.cell_label, "gridcells", "condprob"]
         )
 
-        return prob_out
+        temp2 = {
+            self.cell_label: griddata[self.cell_label],
+            "gridcells": gridcells,
+            "ratiopsi": ratio_psi,
+        }
+        ratio_out = pd.DataFrame(
+            temp2, columns=[self.cell_label, "gridcells", "ratiopsi"]
+        )
+
+        return prob_out,ratio_out
 
     def calc(self):
         prob_images = []
