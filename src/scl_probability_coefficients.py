@@ -30,8 +30,8 @@ class SCLProbabilityCoefficients(SCLTask):
         },
         "structural_habitat": {
             "ee_type": SCLTask.IMAGECOLLECTION,
-            "ee_path": "projects/SCL/v1/Panthera_tigris/geographies/Sumatra/hab/structural_habitat",
-            "maxage": 1,
+            "ee_path": f"projects/SCL/v1/Panthera_tigris/structural_habitat",
+            "maxage": 10,  # until we have full-range SH for every year
         },
     }
     grid_label = "GridName"
@@ -77,9 +77,13 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def _get_df(self, query):
         _gridname_clause = ""
+        _scenario_clause = f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
         if self._gridname:
-            _gridname_clause = f"AND {self.grid_label} = '{self._gridname}' "
-        query = f"{query} {_gridname_clause}"
+            _gridname_clause = f"AND {self.grid_label} = '{self._gridname}'"
+        if self.scenario and self.scenario != self.CANONICAL:
+            _scenario_clause = f"AND ScenarioName = '{self.scenario}'"
+
+        query = f"{query} {_gridname_clause} {_scenario_clause}"
         df = pd.read_sql(query, self.obsconn)
         df.set_index(self.cell_label, inplace=True)
         return df
@@ -114,7 +118,6 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"SELECT * FROM dbo.vw_CI_AdHocObservation "
                 f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
                 f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
-                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_adhoc = self._get_df(query)
         return self._df_adhoc
@@ -127,9 +130,8 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
                 f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
                 f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
-                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
-            self._df_ct_dep = pd.read_sql(query, self.obsconn)
+            self._df_ct_dep = self._get_df(query)
         return self._df_ct_dep
 
     @property
@@ -139,9 +141,8 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
                 f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
                 f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
-                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
-            self._df_ct_obs = pd.read_sql(query, self.obsconn)
+            self._df_ct_obs = self._get_df(query)
         return self._df_ct_obs
 
     @property
@@ -151,7 +152,6 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
                 f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
                 f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
-                f"AND ScenarioName IS NULL OR ScenarioName = '{self.scenario}'"
             )
             self._df_ss = self._get_df(query)
         return self._df_ss
