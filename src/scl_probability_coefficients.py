@@ -6,7 +6,7 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import expit
 import ee
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from task_base import SCLTask
 from geomet import wkt
 
@@ -19,14 +19,16 @@ class SCLProbabilityCoefficients(SCLTask):
         "hii": {
             "ee_type": SCLTask.IMAGECOLLECTION,
             "ee_path": "projects/HII/v1/hii",
-            "maxage": 30,
+            # "maxage": 30,
+            "static": True,
         },
         "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
         # TODO: replace with roads from OSM and calculate distance
         "roads": {
             "ee_type": SCLTask.FEATURECOLLECTION,
             "ee_path": "projects/Panthera-Earth-Engine/Roads/SouthAsiaRoads",
-            "maxage": 1,
+            # "maxage": 1,
+            "static": True,
         },
         "structural_habitat": {
             "ee_type": SCLTask.IMAGECOLLECTION,
@@ -39,7 +41,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.set_aoi_from_ee("projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi")  # temporary
+        # self.set_aoi_from_ee("projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi")  # temporary
 
         try:
             self.OBSDB_HOST = os.environ["OBSDB_HOST"]
@@ -84,6 +86,7 @@ class SCLProbabilityCoefficients(SCLTask):
             _scenario_clause = f"AND ScenarioName = '{self.scenario}'"
 
         query = f"{query} {_gridname_clause} {_scenario_clause}"
+        print(query)
         df = pd.read_sql(query, self.obsconn)
         df.set_index(self.cell_label, inplace=True)
         return df
@@ -190,8 +193,17 @@ class SCLProbabilityCoefficients(SCLTask):
         # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
         roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
 
-        structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
-        hii, hii_date = self.get_most_recent_image(hii_ic)
+        # temporary: use earliest structural_habitat for RFE prob
+        # structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
+        structural_habitat = sh_ic.sort(self.ASSET_TIMESTAMP_PROPERTY, True).first()
+        # temporary: use first (legacy 2009) hii for RFE prob
+        # hii, hii_date = self.get_most_recent_image(hii_ic)
+        hii = hii_ic.sort(self.ASSET_TIMESTAMP_PROPERTY, True).first()
+
+        # hii_date = hii.get(
+        #     self.ASSET_TIMESTAMP_PROPERTY
+        # ).getInfo()
+
         tri = self.tri(dem, 90)
         distance_to_roads = roads.distance().clipToCollection(cell_features)
 
@@ -422,7 +434,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
-            print(self.df_adhoc)
+            # print(self.df_adhoc)
             # print(self.df_signsurvey)
             # TODO: combine CT dep and obs dfs for prob functions
             # df_covars = self.get_covariates(gridname)
@@ -447,33 +459,60 @@ class SCLProbabilityCoefficients(SCLTask):
             # m = self.pbso_integrated()
             # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
 
-            # "Fake" probability used for 6/17/20 calcs -- not for production use
-            # probcells = []
-            # for cell in self.grids[gridname]:
-            #     gridcellcode = cell[1][self.cell_label]
-            #     detections = 0
-            #     try:
-            #         detections = int(
-            #             df_signsurvey[
-            #                 df_signsurvey[self.cell_label].str.match(gridcellcode)
-            #             ]["detections"].sum()
-            #         )
-            #         if detections > 1:
-            #             detections = 1
-            #     except KeyError:
-            #         pass
-            # 
-            #     props = cell[1]
-            #     props["probability"] = detections
-            #     probcell = ee.Feature(cell[0], props)
-            #     probcells.append(probcell)
-            # 
-            # fake_prob = (
-            #     ee.FeatureCollection(probcells)
-            #     .reduceToImage(["probability"], ee.Reducer.max())
-            #     .rename("probability")
-            # )
-            # self.export_image_ee(fake_prob, "hab/probability")
+            # "Fake" probability used for 9/16/20 calcs -- not for production use
+            probcells = []
+            # test = [1078, 1430, 1432, 1509, 1509, 160, 199, 246, 284, 285, 291, 325, 327, 368, 409, 41, 441, 448, 448,
+            #         488, 523, 527, 529, 599, 604, 638, 682, 840, 844, 873, 877, 878, 913, 918, 928, 994, 996, 998]
+            # for i in test:
+            #     matches = len(self.df_adhoc[
+            #                       self.df_adhoc.index.str.match(str(i))
+            #                   ])
+            #     print(i, matches)
+
+            for cell in self.grids[gridname]:
+                gridcellcode = str(cell[1][self.cell_label])
+                ss_detections = 0
+                ah_detections = 0
+                detections = 0
+                try:
+                    ss_detections = int(
+                        self.df_signsurvey[
+                            self.df_signsurvey.index == gridcellcode
+                        ]["detections"].sum()
+                    )
+                    if ss_detections > 1:
+                        ss_detections = 1
+
+                    ah_detections = int(
+                        len(self.df_adhoc[
+                            self.df_adhoc.index == gridcellcode
+                        ])
+                    )
+                    if ah_detections > 1:
+                        ah_detections = 1
+
+                    detections = ss_detections + ah_detections
+                    if detections > 1:
+                        detections = 1
+                    if detections > 0:
+                        print(gridcellcode, detections)
+
+                except KeyError:
+                    pass
+
+                props = cell[1]
+                props["probability"] = detections
+                probcell = ee.Feature(cell[0], props)
+                probcells.append(probcell)
+
+            fake_prob = (
+                ee.FeatureCollection(probcells)
+                .reduceToImage(["probability"], ee.Reducer.max())
+                .rename("probability")
+            )
+            path_segments = [s.replace(" ", "_") for s in self.scenario.split("/")]
+            path = "/".join(path_segments)
+            self.export_image_ee(fake_prob, f"{path}/probability")
 
         # TODO: add (? or otherwise combine) all probability images, one for each grid
         # self.export_image_ee(combined_images, "hab/probability")
