@@ -408,9 +408,8 @@ class SCLProbabilityCoefficients(SCLTask):
         zeta[np.array(known_occurrences) - 1, 0] = 0
         cond_psi = [(np.exp(zeta[i, 1])) / (zeta[i,0]+np.exp(zeta[i,1])) for i in range(0, len(psi))]
 
-        # TODO: account for divide by zero
         #ratio of conditional psi to unconditional psi
-        ratio_psi = [(cond_psi[i, 1])) / (zeta[i,0]) for i in range(0, len(psi))]
+        ratio_psi = [(psi[i, 1]) / (zeta[i,0]) for i in range(0, len(psi))]
 
         gridcells = [i for i in range(1, len(psi) + 1)]
         temp = {
