@@ -75,7 +75,7 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_ct_obs = None
         self._df_ss = None
 
-    def _get_df(self, query):
+    def _get_df(self, query, index_field=cell_label):
         _gridname_clause = ""
         _scenario_clause = f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
         if self._gridname:
@@ -85,7 +85,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
         query = f"{query} {_gridname_clause} {_scenario_clause}"
         df = pd.read_sql(query, self.obsconn)
-        df.set_index(self.cell_label, inplace=True)
+        df.set_index(index_field, inplace=True)
         return df
 
     @property
@@ -131,7 +131,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
                 f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
             )
-            self._df_ct_dep = self._get_df(query)
+            self._df_ct_dep = self._get_df(query,"CameraTrapDeploymentID")
         return self._df_ct_dep
 
     @property
@@ -434,19 +434,26 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def calc(self):
         prob_images = []
+        # TODO: combine CT dep and obs dfs for prob functions, for each CTdeployID sum (num adult males, num adult females, num adults sex unknown, num subadults , num cubs)
+        # need grid cell, days, and det (or sum of detections for each CTdeployID)
+        for CTdepID in self.df_cameratrap_dep.keys():
+            print(CTdepID)
         for gridname in self.grids.keys():
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
             print(self.df_adhoc)
-            # print(self.df_signsurvey)
-            # TODO: combine CT dep and obs dfs for prob functions
-            # df_covars = self.get_covariates(gridname)
-            # print(df_covars)
-            # df_covars.to_csv("covars.csv", encoding="utf-8")
-            # df_covars = pd.read_csv(
-            #     "covars.csv", encoding="utf-8", index_col=self.cell_label
-            # )
+            print(self.df_signsurvey)
+
+            print(self.df_cameratrap_dep)
+            #for CTdepID in self.df_cameratrap_dep.CameraTrapDeploymentID.keys():
+            #    print (CTdepID)
+            df_covars = self.get_covariates(gridname)
+            #print(df_covars)
+            df_covars.to_csv("covars.csv", encoding="utf-8")
+            df_covars = pd.read_csv(
+                "covars.csv", encoding="utf-8", index_col=self.cell_label
+            )
 
             # TODO: set these dynamically
             self.Nx = 3
