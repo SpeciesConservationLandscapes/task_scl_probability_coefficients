@@ -61,6 +61,7 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_adhoc = None
         self._df_ct_dep = None
         self._df_ct_obs = None
+        self._df_ct = None
         self._df_ss = None
         self.Nx = 0
         self.Nw = 0
@@ -76,14 +77,12 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_ss = None
 
     def _get_df(self, query, index_field=cell_label):
-        _gridname_clause = ""
+       
         _scenario_clause = f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
-        if self._gridname:
-            _gridname_clause = f"AND {self.grid_label} = '{self._gridname}'"
         if self.scenario and self.scenario != self.CANONICAL:
             _scenario_clause = f"AND ScenarioName = '{self.scenario}'"
 
-        query = f"{query} {_gridname_clause} {_scenario_clause}"
+        query = f"{query}  {_scenario_clause}"
         df = pd.read_sql(query, self.obsconn)
         df.set_index(index_field, inplace=True)
         return df
@@ -142,8 +141,20 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
                 f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
             )
-            self._df_ct_obs = self._get_df(query)
+            self._df_ct_obs = self._get_df(query,"CameraTrapDeploymentID")
+            self._df_ct_obs["detections"]=self._df_ct_obs["AdultMaleCount"]+self._df_ct_obs["AdultFemaleCount"]+self._df_ct_obs["AdultSexUnknownCount"]+self._df_ct_obs["SubAdultCount"]+self._df_ct_obs["YoungCount"]
+       
         return self._df_ct_obs
+
+    @property
+    def df_cameratrap(self):
+        if self._df_ct is None:
+            self._df_ct["PI"] = self.df_cameratrap_dep["ProjectID"]
+            self._df_ct["PI"] = self.df_cameratrap_dep["ProjectID"]
+            self._df_ct["days"] = self.df_cameratrap_dep["days"]
+            self._df_ct["det"] = self.df_cameratrap_obs["detections"]
+        
+        return self._df_ct
 
     @property
     def df_signsurvey(self):
@@ -434,26 +445,23 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def calc(self):
         prob_images = []
-        # TODO: combine CT dep and obs dfs for prob functions, for each CTdeployID sum (num adult males, num adult females, num adults sex unknown, num subadults , num cubs)
-        # need grid cell, days, and det (or sum of detections for each CTdeployID)
-        for CTdepID in self.df_cameratrap_dep.keys():
-            print(CTdepID)
+
         for gridname in self.grids.keys():
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
-            print(self.df_adhoc)
-            print(self.df_signsurvey)
+            #print(self.df_adhoc)
+            #print(self.df_signsurvey)
 
-            print(self.df_cameratrap_dep)
-            #for CTdepID in self.df_cameratrap_dep.CameraTrapDeploymentID.keys():
-            #    print (CTdepID)
-            df_covars = self.get_covariates(gridname)
+            #print(self.df_cameratrap_dep)
+            print(self.df_cameratrap_obs)
+
+            #df_covars = self.get_covariates(gridname)
             #print(df_covars)
-            df_covars.to_csv("covars.csv", encoding="utf-8")
-            df_covars = pd.read_csv(
-                "covars.csv", encoding="utf-8", index_col=self.cell_label
-            )
+            #df_covars.to_csv("covars.csv", encoding="utf-8")
+            #df_covars = pd.read_csv(
+            #    "covars.csv", encoding="utf-8", index_col=self.cell_label
+            #)
 
             # TODO: set these dynamically
             self.Nx = 3
