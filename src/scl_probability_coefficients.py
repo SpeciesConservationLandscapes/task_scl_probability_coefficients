@@ -74,6 +74,7 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_adhoc = None
         self._df_ct_dep = None
         self._df_ct_obs = None
+        self._df_ct = None
         self._df_ss = None
 
     def _get_df(self, query, index_field=cell_label):
@@ -149,11 +150,7 @@ class SCLProbabilityCoefficients(SCLTask):
     @property
     def df_cameratrap(self):
         if self._df_ct is None:
-            self._df_ct["PI"] = self.df_cameratrap_dep["ProjectID"]
-            self._df_ct["PI"] = self.df_cameratrap_dep["ProjectID"]
-            self._df_ct["days"] = self.df_cameratrap_dep["days"]
-            self._df_ct["det"] = self.df_cameratrap_obs["detections"]
-        
+            self._df_ct = pd.merge(left=self.df_cameratrap_dep,right=self.df_cameratrap_obs,left_index=True,right_index=True)     
         return self._df_ct
 
     @property
@@ -453,8 +450,9 @@ class SCLProbabilityCoefficients(SCLTask):
             #print(self.df_adhoc)
             #print(self.df_signsurvey)
 
-            #print(self.df_cameratrap_dep)
+            print(self.df_cameratrap_dep)
             print(self.df_cameratrap_obs)
+            print(self.df_cameratrap)
 
             #df_covars = self.get_covariates(gridname)
             #print(df_covars)
