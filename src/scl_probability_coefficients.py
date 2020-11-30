@@ -13,9 +13,9 @@ from geomet import wkt
 
 class SCLProbabilityCoefficients(SCLTask):
     inputs = {
-        "obs_adhoc": {"maxage": 1},
-        "obs_ss": {"maxage": 1},
-        "obs_ct": {"maxage": 1},
+        "obs_adhoc": {"maxage": 6},
+        "obs_ss": {"maxage": 6},
+        "obs_ct": {"maxage": 6},
         "hii": {
             "ee_type": SCLTask.IMAGECOLLECTION,
             "ee_path": "projects/HII/v1/hii",
@@ -283,10 +283,10 @@ class SCLProbabilityCoefficients(SCLTask):
         return p
 
     # TODO: refactor par to use self.df_covars?
-    # TODO: replace CT with self.df_* once we've figured out proper schema, and po_data with self.df_adhoc (see below)
+    # TODO: replace po_data with self.df_adhoc (see below)
     # TODO: make sure neg_log_likelihood can account for no data, can have either sign or camera (must have at least 
     # one of these), account for no adhoc data
-    def neg_log_likelihood_int(self, par, CT, po_data):
+    def neg_log_likelihood_int(self, par):
         """Calculates the negative log-likelihood of the function.
          Par: array list of parameters to optimize
          Returns single value of negative log-likelihood of function"""
@@ -304,32 +304,28 @@ class SCLProbabilityCoefficients(SCLTask):
                 + self.NpCT
             ]
         )
+
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        self.df_adhoc["lambda0"] = lambda0
         psi = 1.0 - np.exp(-lambda0)
         tw = np.dot(np.array(self.po_detection_covars), alpha)
         p_thin = expit(tw)
-        # TODO: up to this point we're using self.df_adhoc, indexed like all the others by self.cell_label.
-        #  But below we use po_data, which is a list of the nth rows in the (sorted) list of grid cell labels
-        #  We should refactor out po_data and just use self.df_adhoc, indexed by cell label.
-        self.df_adhoc["p_thin"] = p_thin
+
         zeta = np.empty((len(psi), 2))
         zeta[:, 0] = 1.0 - psi
         zeta[:, 1] = np.log(psi)
-
+        df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
+        print(df_zeta)
         # TODO: refactor out "cell": use self.cell_label
-        #  But need to understand CT structure in order to know how to group, either in sql or in df
-        #  CT.csv: # of detections (not sum of different kinds, apparently) per -- ?
-        #  Should CT start out as np.zeroes?
-        for i in range(0, len(CT["det"])):
-            zeta[CT["cell"][i] - 1, 1] = (
-                zeta[CT["cell"][i] - 1, 1]
-                + (CT["det"][i]) * np.log(p_cam[CT["PI"][i] - 1])
-                + (CT["days"][i] - CT["det"][i]) * np.log(1.0 - p_cam[CT["PI"][i] - 1])
+        for i in range(0, len(self.df_cameratrap["detections"])):
+            df_zeta[zeta1[self.df_cameratrap["GridCellCode"]] = (
+                zeta[self.df_cameratrap["GridCellCode"], 1]
+                + (self.df_cameratrap["det"][i]) * np.log(p_cam[self.df_cameratrap["PI"][i] - 1])
+                + (self.df_camperatrap["days"][i] - self.df_cameratrap["det"][i]) * np.log(1.0 - p_cam[self.df_cameratrap["PI"][i] - 1])
             )
-
+        print(zeta)
         # iterate over unique set of surveys
         survey_ids = list(self.df_signsurvey["SignSurveyID"].unique())
+        print(survey_ids)
         for j in survey_ids:
             zeta[self.df_signsurvey[self.cell_label][j] - 1, 1] = (
                 zeta[self.df_signsurvey[self.cell_label][j] - 1, 1]
@@ -355,7 +351,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 lik_so.append(zeta[i, 1])
             else:
                 lik_so.append(np.log(zeta[i, 0]) + zeta[i, 1])
-
+        # TODO: refactor out po_data and just use self.df_adhoc, indexed by cell label.
         nll_po = -1.0 * (
             + sum(np.log(lambda0[po_data - 1] * p_thin[po_data - 1]))
         )
@@ -450,16 +446,20 @@ class SCLProbabilityCoefficients(SCLTask):
             #print(self.df_adhoc)
             #print(self.df_signsurvey)
 
-            print(self.df_cameratrap_dep)
-            print(self.df_cameratrap_obs)
-            print(self.df_cameratrap)
+            #print(self.df_cameratrap_dep)
+            #print(self.df_cameratrap_obs)
+            #print(self.df_cameratrap)
+
+            #self.df_cameratrap_dep.to_csv("ctdep.csv",encoding="utf-8")
+            #self.df_cameratrap_obs.to_csv("ctobs.csv",encoding="utf-8")
+            #self.df_cameratrap.to_csv("ct.csv",encoding="utf-8")
 
             #df_covars = self.get_covariates(gridname)
             #print(df_covars)
             #df_covars.to_csv("covars.csv", encoding="utf-8")
-            #df_covars = pd.read_csv(
-            #    "covars.csv", encoding="utf-8", index_col=self.cell_label
-            #)
+            df_covars = pd.read_csv(
+                "covars.csv", encoding="utf-8", index_col=self.cell_label
+            )
 
             # TODO: set these dynamically
             self.Nx = 3
@@ -467,13 +467,13 @@ class SCLProbabilityCoefficients(SCLTask):
             self.Npsign = 1
             self.NpCT = 1
 
-            # self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
+            self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
             # # TODO: Why do we need the extra columns? Can 'alpha' and 'beta' be added to these dfs here?
-            # self.po_detection_covars.insert(0, "Int", 1)
-            # self.presence_covars = df_covars[["structural_habitat", "hii"]]
-            # self.presence_covars.insert(0, "Int", 1)
+            self.po_detection_covars.insert(0, "Int", 1)
+            self.presence_covars = df_covars[["structural_habitat", "hii"]]
+            self.presence_covars.insert(0, "Int", 1)
 
-            # m = self.pbso_integrated()
+            m = self.pbso_integrated()
             # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
