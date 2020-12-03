@@ -122,7 +122,6 @@ class SCLProbabilityCoefficients(SCLTask):
             self._df_adhoc = self._get_df(query)
         return self._df_adhoc
 
-    # TODO: refactor these CT dfs once we figure out new schema (use adhoc/ss as recipe)
     @property
     def df_cameratrap_dep(self):
         if self._df_ct_dep is None:
@@ -134,6 +133,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._df_ct_dep = self._get_df(query,"CameraTrapDeploymentID")
         return self._df_ct_dep
 
+    #TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime
     @property
     def df_cameratrap_obs(self):
         if self._df_ct_obs is None:
@@ -316,13 +316,14 @@ class SCLProbabilityCoefficients(SCLTask):
         df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
         print(df_zeta)
         # TODO: refactor out "cell": use self.cell_label
-        for i in range(0, len(self.df_cameratrap["detections"])):
-            df_zeta[zeta1[self.df_cameratrap["GridCellCode"]] = (
-                zeta[self.df_cameratrap["GridCellCode"], 1]
-                + (self.df_cameratrap["det"][i]) * np.log(p_cam[self.df_cameratrap["PI"][i] - 1])
-                + (self.df_camperatrap["days"][i] - self.df_cameratrap["det"][i]) * np.log(1.0 - p_cam[self.df_cameratrap["PI"][i] - 1])
-            )
-        print(zeta)
+        ct_ids = list(self.df_cameratrap["CameraTrapDeploymentID"].unique())
+        print(ct_ids)
+        #for i in ct_ids:
+        #    df_zeta.loc[[self.df_cameratrap.index().CameraTrapDeploymentID[i],'zeta1']] = 
+        #        df_zeta.loc[[self.df_cameratrap.index().CameraTrapDeploymentID[i],'zeta1']]
+        #        + (self.df_cameratrap["det"][i]) * np.log(p_cam[self.df_cameratrap["PI"][i] - 1])
+        #        + (self.df_camperatrap["days"][i] - self.df_cameratrap["det"][i]) * np.log(1.0 - p_cam[self.df_cameratrap["PI"][i] - 1])
+            
         # iterate over unique set of surveys
         survey_ids = list(self.df_signsurvey["SignSurveyID"].unique())
         print(survey_ids)
