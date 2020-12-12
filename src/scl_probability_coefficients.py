@@ -19,8 +19,8 @@ from task_base import SCLTask
 class SCLProbabilityCoefficients(SCLTask):
     GRID_LABEL = "GridName"
     CELL_LABEL = "GridCellCode"
-    MASTER_GRID_LABEL = "master_grid"
-    MASTER_CELL_LABEL = "master_gridcell"
+    MASTER_GRID_LABEL = "mastergrid"
+    MASTER_CELL_LABEL = "mastergridcell"
     MASTER_CELL_ID_LABEL = "id"
     POINT_LOC_LABEL = "PointLocation"
     GRIDCELL_LOC_LABEL = "GridCellLocation"
@@ -149,7 +149,6 @@ class SCLProbabilityCoefficients(SCLTask):
         # matching_zones = self.zones.filterBounds(centroid)
         intersects = ee.Filter.intersects(".geo", None, ".geo")
         matching_zones = ee.Join.simple().apply(self.zones, obs_feature, intersects)
-        # TODO: handle edge cases where first matching zone/cell isn't right
         zone_id_true = ee.Number(matching_zones.first().get(self.ZONES_LABEL))
         zone_id_false = ee.Number(self.EE_NODATA)
         zone_id = ee.Number(
@@ -226,10 +225,14 @@ class SCLProbabilityCoefficients(SCLTask):
                 featurecollection, self.BUCKET, blob, "CSV", columns
             )
             self.wait()
-            csv = self._download_from_cloudstorage(
-                f"{blob}.csv", f"{tempfile}.csv"
-            )
+            csv = self._download_from_cloudstorage(f"{blob}.csv", f"{tempfile}.csv")
             self.fc_csvs.append(csv)
+
+            # uncomment to export shp for QA
+            # shp_task_id = self.export_fc_cloudstorage(
+            #     featurecollection, self.BUCKET, blob, "SHP", columns
+            # )
+
             df = pd.read_csv(csv, encoding="utf-8")
             self._remove_from_cloudstorage(f"{blob}.csv")
         return df
