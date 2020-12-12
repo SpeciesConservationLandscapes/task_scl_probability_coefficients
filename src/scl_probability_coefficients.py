@@ -327,14 +327,12 @@ class SCLProbabilityCoefficients(SCLTask):
         for j in survey_ids:
             df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
                 += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
-                   # + (self.df_signsurvey["NumberOfReplicatesSurveyed"][j]- self.df_signsurvey["detections"][j])* np.log(1.0 - p_sign[self.df_signsurvey["SignSurveyID"][j] - 1]))
-        print(df_zeta)
-        # TODO: make variable names more readable
-        one = self.df_signsurvey[self.df_signsurvey["detections"] > 0][self.cell_label]
-        two = CT[CT["det"] > 0][self.cell_label]
-        known_occurrences = list(set(one.append(two)))
+                    + (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["NumberOfReplicatesSurveyed"].values[0]- self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(1.0 - p_sign[self.Npsign - 1])
 
-        zeta[np.array(known_occurrences) - 1, 0] = 0
+        known_sign = self.df_signsurvey.index[(self.df_signsurvey['detections']>0)].tolist()
+        known_ct = self.df_cameratrap[self.df_cameratrap['detections']>0]['GridCellCode'].tolist()
+        known_occurrences = list(set(known_sign+known_ct))
+        df_zeta.loc[known_occurrences, 'zeta0'] = 0
 
         lik_so = []
         for i in range(0, len(zeta[:, 0])):
