@@ -314,7 +314,7 @@ class SCLProbabilityCoefficients(SCLTask):
         zeta[:, 0] = 1.0 - psi
         zeta[:, 1] = np.log(psi)
         df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
-        print(df_zeta)
+
         #iterate over unique cameratrap observation IDs
         ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
         for i in ct_ids:
@@ -334,19 +334,15 @@ class SCLProbabilityCoefficients(SCLTask):
         known_occurrences = list(set(known_sign+known_ct))
         df_zeta.loc[known_occurrences, 'zeta0'] = 0
 
-        lik_so = []
-        for i in range(0, len(zeta[:, 0])):
-            if zeta[i, 0] == 0:
-                lik_so.append(zeta[i, 1])
-            else:
-                lik_so.append(np.log(zeta[i, 0]) + zeta[i, 1])
-        # TODO: refactor out po_data and just use self.df_adhoc, indexed by cell label.
-        nll_po = -1.0 * (
-            + sum(np.log(lambda0[po_data - 1] * p_thin[po_data - 1]))
-        )
-        nll_so = -1.0 * sum(lik_so)
+        df_zeta["lik_so"] = df_zeta.loc[:,'zeta1']
+        df_zeta.loc[df_zeta.index[(df_zeta['zeta0']!=0)].tolist(),'lik_so']+= np.log(df_zeta.loc[df_zeta.index[(df_zeta['zeta0']!=0)].tolist(),'zeta0'])
+        df_zeta["lambda0"] = lambda0
+        df_zeta["pthin"] = p_thin
+        adhoc_indices=list(set(self.df_adhoc.index.values) & set(df_zeta.index.values)) 
+        nll_po = -1.0 * sum(np.log(df_zeta.loc[adhoc_indices,'lambda0']*df_zeta.loc[adhoc_indices,'pthin']))
+        nll_so = -1.0 * sum(df_zeta['lik_so'])
 
-        return nll_po[0] + nll_so
+        return nll_po + nll_so
 
     # TODO: DRY this up to avoid the repeated lines (should look like neg_log_likelihood_int after refactoring params)
     # TODO: predict_surface must account for no data
@@ -432,7 +428,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
-            #print(self.df_adhoc)
+            print(self.df_adhoc)
             #print(self.df_signsurvey)
 
             #print(self.df_cameratrap_dep)
