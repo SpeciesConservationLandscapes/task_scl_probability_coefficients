@@ -322,7 +322,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
                     += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
                         + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
-            except:
+            except KeyError:
                 print('missing camera trap grid cell')
 
         # iterate over unique set of surveys
