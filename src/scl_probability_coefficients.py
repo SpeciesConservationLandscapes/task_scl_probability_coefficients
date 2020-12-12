@@ -1,17 +1,37 @@
-import os
 import argparse
-import pyodbc
+import ee
+import os
 import numpy as np
 import pandas as pd
+import pyodbc
+import time
+import uuid
+from datetime import datetime, timezone
+from geomet import wkt
+from google.cloud.storage import Client
+from google.cloud.exceptions import NotFound
+from pathlib import Path
 from scipy.optimize import minimize
 from scipy.special import expit
-import ee
-from datetime import datetime, timezone
 from task_base import SCLTask
-from geomet import wkt
 
 
 class SCLProbabilityCoefficients(SCLTask):
+    GRID_LABEL = "GridName"
+    CELL_LABEL = "GridCellCode"
+    MASTER_GRID_LABEL = "master_grid"
+    MASTER_CELL_LABEL = "master_gridcell"
+    MASTER_CELL_ID_LABEL = "id"
+    POINT_LOC_LABEL = "PointLocation"
+    GRIDCELL_LOC_LABEL = "GridCellLocation"
+    ZONES_LABEL = "Biome_zone"
+    UNIQUE_ID_LABEL = "UniqueID"
+    EE_NODATA = -9999
+    BUCKET = "scl-pipeline"
+
+    MASTERGRID_DF_COLUMNS = [UNIQUE_ID_LABEL, MASTER_GRID_LABEL, MASTER_CELL_LABEL]
+
+    google_creds_path = "/.google_creds"
     inputs = {
         "obs_adhoc": {"maxage": 6},
         "obs_ss": {"maxage": 6},
@@ -33,7 +53,7 @@ class SCLProbabilityCoefficients(SCLTask):
             "ee_path": "projects/SCL/v1/Panthera_tigris/structural_habitat",
             "maxage": 10,  # until we have full-range SH for every year
         },
-        "biome_zones": {
+        "zones": {
             "ee_type": SCLTask.FEATURECOLLECTION,
             "ee_path": "projects/SCL/v1/Panthera_tigris/zones",
             "static": True,
@@ -44,13 +64,6 @@ class SCLProbabilityCoefficients(SCLTask):
             "static": True,
         },
     }
-    grid_label = "GridName"
-    cell_label = "GridCellCode"
-    master_grid_label = "master_grid_label"
-    master_cell_label = "master_cell_label"
-    point_loc_label = "PointLocation"
-    gridcell_loc_label = "GridCellLocation"
-    biome_zones_label = "Biome_zone"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -70,87 +83,49 @@ class SCLProbabilityCoefficients(SCLTask):
         )
         self.obsconn = pyodbc.connect(_obsconn_str)
 
+        # Set up google cloud credentials separate from ee creds
+        creds_path = Path(self.google_creds_path)
+        if creds_path.exists() is False:
+            with open(str(creds_path), "w") as f:
+                f.write(self.service_account_key)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
+
+        self._zone_ids = []
         self._grids = {}
         self._gridname = None
         self._df_adhoc = None
         self._df_ct_dep = None
         self._df_ct_obs = None
         self._df_ss = None
+        self._df_covars = None
+        self.zone = None
         self.Nx = 0
         self.Nw = 0
         self.Npsign = 0
         self.NpCT = 0
-        self.po_detection_covars = (
-            None
-        )  # coefficients relevant to presence-only and background detection only
-        self.presence_covars = (
-            None
-        )  # coefficients relevant to occupancy, shared across models
+        # coefficients relevant to presence-only and background detection only
+        self.po_detection_covars = None
+        # coefficients relevant to occupancy, shared across models
+        self.presence_covars = None
 
-        self.zones = ee.FeatureCollection(self.inputs["biome_zones"]["ee_path"])
+        self.zones = ee.FeatureCollection(self.inputs["zones"]["ee_path"])
         self.gridcells = ee.FeatureCollection(self.inputs["gridcells"]["ee_path"])
+        self.fc_csvs = []
 
-    def _reset_df_caches(self):
-        self._df_adhoc = None
-        self._df_ct_dep = None
-        self._df_ct_obs = None
-        self._df_ss = None
+    def _download_from_cloudstorage(self, blob_path: str, local_path: str) -> str:
+        client = Client()
+        bucket = client.get_bucket(self.BUCKET)
+        blob = bucket.blob(blob_path)
+        blob.download_to_filename(local_path)
+        return local_path
 
-    def _add_master_gridcells(self, df):
-        def _feature(point_geom, gridcell_geom, cell_label):
-            geom = gridcell_geom
-            if point_geom:
-                geom = point_geom
-            return ee.Feature(wkt.loads(geom), {self.cell_label: cell_label})
-
-        obs_features = ee.FeatureCollection(
-            [
-                _feature(o[0], o[1], o[2])
-                for o in zip(
-                    df[self.point_loc_label],
-                    df[self.gridcell_loc_label],
-                    df[self.cell_label],
-                )
-            ]
-        )
-
-        def find_master_grid_cell(obs_feature):
-            try:
-                centroid = obs_feature.centroid().geometry()
-                zone_id = (
-                    self.zones.filterBounds(centroid)
-                    .first()
-                    .get(self.biome_zones_label)
-                )
-                try:
-                    gridcell_id = (
-                        self.gridcells.filter(ee.Filter.eq("zone", zone_id))
-                        .filterBounds(centroid)
-                        .first()
-                        .get("id")
-                    )
-                    obs_feature = obs_feature.setMulti(
-                        {
-                            self.master_grid_label: zone_id,
-                            self.master_cell_label: gridcell_id,
-                        }
-                    )
-                except ee.ee_exception.EEException:
-                    # TODO: pass in obs id, use that to join
-                    print(
-                        f"{obs_feature} is not contained by any gridcell for zone {zone_id}."
-                    )
-            except ee.ee_exception.EEException:
-                print(f"{obs_feature} is not contained by any biome zone.")
-
-            return obs_feature
-
-        return_obs_features = obs_features.map(find_master_grid_cell)
-        print(return_obs_features.first().getInfo())
-        # TODO: add new master grid name and cell label to df
-        #  then remove set_index calls and add logic in calc() to filter by grid and then set index
-
-        return df
+    def _remove_from_cloudstorage(self, blob_path: str):
+        client = Client()
+        bucket = client.bucket(self.BUCKET)
+        try:  # don't fail entire task if this fails
+            bucket.delete_blob(blob_path)
+        except NotFound:
+            print(f"{blob_path} not found")
 
     def _get_df(self, query):
         _scenario_clause = (
@@ -161,12 +136,106 @@ class SCLProbabilityCoefficients(SCLTask):
 
         query = f"{query} {_scenario_clause}"
         df = pd.read_sql(query, self.obsconn)
-        df = self._add_master_gridcells(df)
-        df.set_index(self.cell_label, inplace=True)
+        return df
+
+    def _obs_feature(self, point_geom, gridcell_geom, id_label):
+        geom = gridcell_geom
+        if point_geom:
+            geom = point_geom
+        return ee.Feature(wkt.loads(geom), {self.UNIQUE_ID_LABEL: id_label})
+
+    def _find_master_grid_cell(self, obs_feature):
+        centroid = obs_feature.centroid().geometry()
+        # matching_zones = self.zones.filterBounds(centroid)
+        intersects = ee.Filter.intersects(".geo", None, ".geo")
+        matching_zones = ee.Join.simple().apply(self.zones, obs_feature, intersects)
+        # TODO: handle edge cases where first matching zone/cell isn't right
+        zone_id_true = ee.Number(matching_zones.first().get(self.ZONES_LABEL))
+        zone_id_false = ee.Number(self.EE_NODATA)
+        zone_id = ee.Number(
+            ee.Algorithms.If(matching_zones.size().gte(1), zone_id_true, zone_id_false)
+        )
+
+        gridcell_id_true = ee.Number(
+            self.gridcells.filter(ee.Filter.eq("zone", zone_id))
+            .filterBounds(centroid)
+            .first()
+            .get(self.MASTER_CELL_ID_LABEL)
+        )
+        gridcell_id_false = ee.Number(self.EE_NODATA)
+        gridcell_id = ee.Number(
+            ee.Algorithms.If(
+                zone_id.neq(self.EE_NODATA), gridcell_id_true, gridcell_id_false
+            )
+        )
+
+        obs_feature = obs_feature.setMulti(
+            {self.MASTER_GRID_LABEL: zone_id, self.MASTER_CELL_LABEL: gridcell_id}
+        )
+
+        return obs_feature
+
+    # add "master grid" and "master gridcell" to df
+    def zonify(self, df):
+        obs_features = ee.FeatureCollection(
+            [
+                self._obs_feature(o[0], o[1], o[2])
+                for o in zip(
+                    df[self.POINT_LOC_LABEL],
+                    df[self.GRIDCELL_LOC_LABEL],
+                    df[self.UNIQUE_ID_LABEL],
+                )
+                if (o[0] or o[1]) and o[2]
+            ]
+        )
+
+        return_obs_features = obs_features.map(self._find_master_grid_cell)
+        master_grid_df = self.fc2df(return_obs_features, self.MASTERGRID_DF_COLUMNS)
+        if master_grid_df.empty:
+            master_grid_df[self.UNIQUE_ID_LABEL] = pd.Series(dtype="object")
+            master_grid_df[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
+            master_grid_df[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
+
+        df = pd.merge(left=df, right=master_grid_df)
+
+        # save out non-intersecting observations
+        df_nonintersections = df[
+            (df[self.MASTER_GRID_LABEL] == self.EE_NODATA)
+            | (df[self.MASTER_CELL_LABEL] == self.EE_NODATA)
+        ]
+        if not df_nonintersections.empty:
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            df_nonintersections.to_csv(f"nonintersecting-{timestr}.csv")
+
+        # Filter out rows not in any zone and rows not in any gridcell (-9999)
+        df = df[
+            (df[self.MASTER_GRID_LABEL] != self.EE_NODATA)
+            & (df[self.MASTER_CELL_LABEL] != self.EE_NODATA)
+        ]
+
+        return df
+
+    def fc2df(self, featurecollection, columns=None):
+        df = pd.DataFrame()
+        fcsize = featurecollection.size().getInfo()
+
+        if fcsize > 0:
+            tempfile = str(uuid.uuid4())
+            blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
+            task_id = self.export_fc_cloudstorage(
+                featurecollection, self.BUCKET, blob, "CSV", columns
+            )
+            self.wait()
+            csv = self._download_from_cloudstorage(
+                f"{blob}.csv", f"{tempfile}.csv"
+            )
+            self.fc_csvs.append(csv)
+            df = pd.read_csv(csv, encoding="utf-8")
+            self._remove_from_cloudstorage(f"{blob}.csv")
         return df
 
     @property
-    def grids(self):
+    def user_grids(self):
         if len(self._grids) < 1:
             gridnames = set(
                 self.df_adhoc["GridName"].unique().tolist()
@@ -184,9 +253,17 @@ class SCLProbabilityCoefficients(SCLTask):
                 df_gridcells = pd.read_sql(gridcells_query, self.obsconn)
                 gridcells_list = df_gridcells.values.tolist()
                 self._grids[gridname] = [
-                    (wkt.loads(g[1]), {self.cell_label: g[0]}) for g in gridcells_list
+                    (wkt.loads(g[1]), {self.CELL_LABEL: g[0]}) for g in gridcells_list
                 ]
         return self._grids
+
+    @property
+    def zone_ids(self):
+        if len(self._zone_ids) < 1:
+            self._zone_ids = (
+                self.zones.aggregate_histogram(self.ZONES_LABEL).keys().getInfo()
+            )
+        return self._zone_ids
 
     @property
     def df_adhoc(self):
@@ -197,7 +274,11 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
             )
             self._df_adhoc = self._get_df(query)
-        return self._df_adhoc
+            self._df_adhoc = self.zonify(self._df_adhoc)
+            self._df_adhoc.set_index(self.MASTER_CELL_LABEL, inplace=True)
+        return self._df_adhoc[
+            self._df_adhoc[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
     # TODO: refactor these CT dfs once we figure out new schema (use adhoc/ss as recipe)
     @property
@@ -209,8 +290,14 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
             )
             self._df_ct_dep = self._get_df(query)
-        return self._df_ct_dep
+            self._df_ct_dep = self.zonify(self._df_ct_dep)
+            self._df_ct_dep.set_index("CameraTrapDeploymentID", inplace=True)
+        return self._df_ct_dep[
+            self._df_ct_dep[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
+    # This will be the same across all zones, because there is no way to look up master grids based on location.
+    # The assumption is that this will be joined to self.df_cameratrap_dep, which is zone-filtered.
     @property
     def df_cameratrap_obs(self):
         if self._df_ct_obs is None:
@@ -220,6 +307,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
             )
             self._df_ct_obs = self._get_df(query)
+            self._df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
         return self._df_ct_obs
 
     @property
@@ -231,18 +319,9 @@ class SCLProbabilityCoefficients(SCLTask):
                 f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
             )
             self._df_ss = self._get_df(query)
-        return self._df_ss
-
-    def fc2df(self, featurecollection):
-        features = featurecollection.getInfo()["features"]
-        rows = []
-        for f in features:
-            attr = f["properties"]
-            rows.append(attr)
-
-        df = pd.DataFrame(rows)
-        df.set_index(self.cell_label, inplace=True)
-        return df
+            self._df_ss = self.zonify(self._df_ss)
+            self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
+        return self._df_ss[self._df_ss[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
     def tri(self, dem, scale):
         neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
@@ -251,55 +330,63 @@ class SCLProbabilityCoefficients(SCLTask):
         tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
         return tri
 
-    # Currently this just gets the mean of each covariate within each grid cell (based on self.scale = 1km)
     # Probably we need more sophisticated covariate definitions (mode of rounded cell vals?)
     # or to sample using smaller gridcell geometries
-    def get_covariates(self, grid):
-        try:
-            cells = [ee.Feature(g[0], g[1]) for g in self.grids[grid]]
-        except KeyError:
-            raise KeyError(f"No grid {grid} in observations")
-        cell_features = ee.FeatureCollection(cells)
+    @property
+    def df_covars(self):
+        if self._df_covars is None:
+            sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
+            hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
+            dem = ee.Image(self.inputs["dem"]["ee_path"])
+            # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
+            roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
 
-        sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
-        hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
-        dem = ee.Image(self.inputs["dem"]["ee_path"])
-        # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
-        roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
+            structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
+            hii, hii_date = self.get_most_recent_image(hii_ic)
+            tri = self.tri(dem, 90)
+            distance_to_roads = roads.distance().clipToCollection(self.zones)
 
-        structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
-        hii, hii_date = self.get_most_recent_image(hii_ic)
-        tri = self.tri(dem, 90)
-        distance_to_roads = roads.distance().clipToCollection(cell_features)
+            if structural_habitat and hii:
+                covariates_bands = (
+                    structural_habitat.rename("structural_habitat")
+                    .addBands(hii.rename("hii"))
+                    .addBands(tri.rename("tri"))
+                    .addBands(distance_to_roads.rename("distance_to_roads"))
+                )
+                covariates_fc = covariates_bands.reduceRegions(
+                    collection=self.gridcells,
+                    reducer=ee.Reducer.mean(),
+                    scale=self.scale,
+                    crs=self.crs,
+                )
+                self._df_covars = self.fc2df(covariates_fc)
 
-        if structural_habitat and hii:
-            covariates_bands = (
-                structural_habitat.rename("structural_habitat")
-                .addBands(hii.rename("hii"))
-                .addBands(tri.rename("tri"))
-                .addBands(distance_to_roads.rename("distance_to_roads"))
-            )
-            covariates_fc = covariates_bands.reduceRegions(
-                collection=cell_features,
-                reducer=ee.Reducer.mean(),
-                scale=self.scale,
-                crs=self.crs,
-            )
-            _df_covars = self.fc2df(covariates_fc)
+                if self._df_covars.empty:
+                    self._df_covars[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
+                    self._df_covars[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
+                else:
+                    self._df_covars.rename(
+                        {"zone": self.MASTER_GRID_LABEL, "id": self.MASTER_CELL_LABEL},
+                        axis=1,
+                        inplace=True,
+                    )
+                    # covar_stats = self._df_covars.describe()
+                    # TODO: determine whether we need this anymore
+                    #  at master grid level. If we do, need to change the logic for choosing which columns to modify.
+                    # for col in covar_stats.columns:
+                    #     if not col.startswith("Unnamed"):
+                    #         self._df_covars[col] = (
+                    #             self._df_covars[col] - covar_stats[col]["mean"]
+                    #         ) / covar_stats[col]["std"]
 
-            covar_stats = _df_covars.describe()
-            # TODO: add comment explaining why we're replacing raw covar values
-            # TODO: reexamine this when we figure out more sophisticated sampling -- maybe roll this into ee
-            for col in covar_stats.columns:
-                if not col.startswith("Unnamed"):
-                    _df_covars[col] = (
-                        _df_covars[col] - covar_stats[col]["mean"]
-                    ) / covar_stats[col]["std"]
-
-            # TODO: check this -- means no row for any cell with ANY missing covars
-            return _df_covars.dropna()
-        else:
-            return None
+                # TODO: check this -- means no row for any cell with ANY missing covars
+                # self._df_covars = self._df_covars.dropna()
+                self._df_covars.set_index(self.MASTER_CELL_LABEL, inplace=True)
+            else:
+                return None
+        return self._df_covars[
+            self._df_covars[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
     def pbso_integrated(self):
         """Overall function for optimizing function.
@@ -394,8 +481,8 @@ class SCLProbabilityCoefficients(SCLTask):
         # iterate over unique set of surveys
         survey_ids = list(self.df_signsurvey["SignSurveyID"].unique())
         for j in survey_ids:
-            zeta[self.df_signsurvey[self.cell_label][j] - 1, 1] = (
-                zeta[self.df_signsurvey[self.cell_label][j] - 1, 1]
+            zeta[self.df_signsurvey[self.CELL_LABEL][j] - 1, 1] = (
+                zeta[self.df_signsurvey[self.CELL_LABEL][j] - 1, 1]
                 + (self.df_signsurvey["detections"][j])
                 * np.log(p_sign[self.df_signsurvey["SignSurveyID"][j] - 1])
                 + (
@@ -406,8 +493,8 @@ class SCLProbabilityCoefficients(SCLTask):
             )
 
         # TODO: make variable names more readable
-        one = self.df_signsurvey[self.df_signsurvey["detections"] > 0][self.cell_label]
-        two = CT[CT["det"] > 0][self.cell_label]
+        one = self.df_signsurvey[self.df_signsurvey["detections"] > 0][self.CELL_LABEL]
+        two = CT[CT["det"] > 0][self.CELL_LABEL]
         known_occurrences = list(set(one.append(two)))
 
         zeta[np.array(known_occurrences) - 1, 0] = 0
@@ -479,81 +566,88 @@ class SCLProbabilityCoefficients(SCLTask):
         cond_prob = 1.0 - (1.0 - np.exp(np.multiply(-1, cond_psi)))
         gridcells = [i for i in range(1, len(psi) + 1)]
         temp = {
-            self.cell_label: griddata[self.cell_label],
+            self.CELL_LABEL: griddata[self.CELL_LABEL],
             "gridcells": gridcells,
             "condprob": cond_prob,
         }
         prob_out = pd.DataFrame(
-            temp, columns=[self.cell_label, "gridcells", "condprob"]
+            temp, columns=[self.CELL_LABEL, "gridcells", "condprob"]
         )
 
         # TODO: return 2 dataframes: 1) conditional, 2) ratio of conditional to unconditional
         return prob_out
 
     def calc(self):
-        print(self.df_adhoc)
-        prob_images = []
-        # for gridname in self.grids.keys():
-        #     self._gridname = gridname
-        #     self._reset_df_caches()
-        #     # just observations for this gridname, where cell labels can be used as index
-        #     # print(self.df_signsurvey)
-        #     # TODO: combine CT dep and obs dfs for prob functions
-        #     # df_covars = self.get_covariates(gridname)
-        #     # print(df_covars)
-        #     # df_covars.to_csv("covars.csv", encoding="utf-8")
-        #     # df_covars = pd.read_csv(
-        #     #     "covars.csv", encoding="utf-8", index_col=self.cell_label
-        #     # )
-        #
-        #     # TODO: set these dynamically
-        #     self.Nx = 3
-        #     self.Nw = 3
-        #     self.Npsign = 1
-        #     self.NpCT = 1
-        #
-        #     # self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
-        #     # # TODO: Why do we need the extra columns? Can 'alpha' and 'beta' be added to these dfs here?
-        #     # self.po_detection_covars.insert(0, "Int", 1)
-        #     # self.presence_covars = df_covars[["structural_habitat", "hii"]]
-        #     # self.presence_covars.insert(0, "Int", 1)
-        #
-        #     # m = self.pbso_integrated()
-        #     # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
-        #
-        #     # "Fake" probability used for 6/17/20 calcs -- not for production use
-        #     # probcells = []
-        #     # for cell in self.grids[gridname]:
-        #     #     gridcellcode = cell[1][self.cell_label]
-        #     #     detections = 0
-        #     #     try:
-        #     #         detections = int(
-        #     #             df_signsurvey[
-        #     #                 df_signsurvey[self.cell_label].str.match(gridcellcode)
-        #     #             ]["detections"].sum()
-        #     #         )
-        #     #         if detections > 1:
-        #     #             detections = 1
-        #     #     except KeyError:
-        #     #         pass
-        #     #
-        #     #     props = cell[1]
-        #     #     props["probability"] = detections
-        #     #     probcell = ee.Feature(cell[0], props)
-        #     #     probcells.append(probcell)
-        #     #
-        #     # fake_prob = (
-        #     #     ee.FeatureCollection(probcells)
-        #     #     .reduceToImage(["probability"], ee.Reducer.max())
-        #     #     .rename("probability")
-        #     # )
-        #     # self.export_image_ee(fake_prob, "hab/probability")
+        # print(self.zone_ids)
+        # prob_images = []
+        for zone in self.zone_ids:
+            self.zone = zone  # all dataframes are filtered by this
+            # print(self.df_adhoc)
+            # print(self.df_signsurvey)
+            # print(self.df_cameratrap_dep)
+            # print(self.df_cameratrap_obs)
+            # print(self.df_covars)
+            # self.df_covars.to_csv("covars.csv", encoding="utf-8")
+            # self.df_covars = pd.read_csv(
+            #     "covars.csv", encoding="utf-8", index_col=self.cell_label
+            # )
+
+            # TODO: set these dynamically
+            self.Nx = 3
+            self.Nw = 3
+            self.Npsign = 1
+            self.NpCT = 1
+
+            # self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
+            # TODO: Why do we need the extra columns? Can 'alpha' and 'beta' be added to these dfs here?
+            # self.po_detection_covars.insert(0, "Int", 1)
+            # self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
+            # self.presence_covars.insert(0, "Int", 1)
+
+            # m = self.pbso_integrated()
+            # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
+
+            # "Fake" probability used for 6/17/20 calcs -- not for production use
+            # probcells = []
+            # for cell in self.grids[gridname]:
+            #     gridcellcode = cell[1][self.cell_label]
+            #     detections = 0
+            #     try:
+            #         detections = int(
+            #             df_signsurvey[
+            #                 df_signsurvey[self.cell_label].str.match(gridcellcode)
+            #             ]["detections"].sum()
+            #         )
+            #         if detections > 1:
+            #             detections = 1
+            #     except KeyError:
+            #         pass
+            #
+            #     props = cell[1]
+            #     props["probability"] = detections
+            #     probcell = ee.Feature(cell[0], props)
+            #     probcells.append(probcell)
+            #
+            # fake_prob = (
+            #     ee.FeatureCollection(probcells)
+            #     .reduceToImage(["probability"], ee.Reducer.max())
+            #     .rename("probability")
+            # )
+            # self.export_image_ee(fake_prob, "hab/probability")
 
         # TODO: add (? or otherwise combine) all probability images, one for each grid
         # self.export_image_ee(combined_images, "hab/probability")
 
     def check_inputs(self):
         super().check_inputs()
+
+    def clean_up(self, **kwargs):
+        if self.status == self.FAILED:
+            return
+
+        if self.fc_csvs:
+            for csv in self.fc_csvs:
+                Path(csv).unlink()
 
 
 if __name__ == "__main__":
