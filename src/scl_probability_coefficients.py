@@ -315,30 +315,20 @@ class SCLProbabilityCoefficients(SCLTask):
         zeta[:, 1] = np.log(psi)
         df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
         print(df_zeta)
-        # TODO: refactor out "cell": use self.cell_label
-        ct_ids = list(self.df_cameratrap["CameraTrapDeploymentID"].unique())
-        print(ct_ids)
-        #for i in ct_ids:
-        #    df_zeta.loc[[self.df_cameratrap.index().CameraTrapDeploymentID[i],'zeta1']] = 
-        #        df_zeta.loc[[self.df_cameratrap.index().CameraTrapDeploymentID[i],'zeta1']]
-        #        + (self.df_cameratrap["det"][i]) * np.log(p_cam[self.df_cameratrap["PI"][i] - 1])
-        #        + (self.df_camperatrap["days"][i] - self.df_cameratrap["det"][i]) * np.log(1.0 - p_cam[self.df_cameratrap["PI"][i] - 1])
-            
+        #iterate over unique cameratrap observation IDs
+        ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
+        for i in ct_ids:
+            df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
+                += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
+                    + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
+   
         # iterate over unique set of surveys
-        survey_ids = list(self.df_signsurvey["SignSurveyID"].unique())
-        print(survey_ids)
+        survey_ids = list(self.df_signsurvey.UniqueID.unique())
         for j in survey_ids:
-            zeta[self.df_signsurvey[self.cell_label][j] - 1, 1] = (
-                zeta[self.df_signsurvey[self.cell_label][j] - 1, 1]
-                + (self.df_signsurvey["detections"][j])
-                * np.log(p_sign[self.df_signsurvey["SignSurveyID"][j] - 1])
-                + (
-                    self.df_signsurvey["NumberOfReplicatesSurveyed"][j]
-                    - self.df_signsurvey["detections"][j]
-                )
-                * np.log(1.0 - p_sign[self.df_signsurvey["SignSurveyID"][j] - 1])
-            )
-
+            df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
+                += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
+                   # + (self.df_signsurvey["NumberOfReplicatesSurveyed"][j]- self.df_signsurvey["detections"][j])* np.log(1.0 - p_sign[self.df_signsurvey["SignSurveyID"][j] - 1]))
+        print(df_zeta)
         # TODO: make variable names more readable
         one = self.df_signsurvey[self.df_signsurvey["detections"] > 0][self.cell_label]
         two = CT[CT["det"] > 0][self.cell_label]
