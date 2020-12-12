@@ -428,7 +428,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._gridname = gridname
             self._reset_df_caches()
             # just observations for this gridname, where cell labels can be used as index
-            print(self.df_adhoc)
+            #print(self.df_adhoc)
             #print(self.df_signsurvey)
 
             #print(self.df_cameratrap_dep)
@@ -459,6 +459,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self.presence_covars.insert(0, "Int", 1)
 
             m = self.pbso_integrated()
+            print(m)
             # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
