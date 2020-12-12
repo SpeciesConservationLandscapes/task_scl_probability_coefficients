@@ -342,7 +342,7 @@ class SCLProbabilityCoefficients(SCLTask):
         df_zeta["lambda0"] = lambda0
         df_zeta["pthin"] = p_thin
         adhoc_indices=list(set(self.df_adhoc.index.values) & set(df_zeta.index.values)) 
-        nll_po = -1.0 * sum(np.log(df_zeta.loc[adhoc_indices,'lambda0']*df_zeta.loc[adhoc_indices,'pthin']))
+        nll_po = -1.0 * ((-1.0*sum(lambda0*p_thin))+sum(np.log(df_zeta.loc[adhoc_indices,'lambda0']*df_zeta.loc[adhoc_indices,'pthin'])))
         nll_so = -1.0 * sum(df_zeta['lik_so'])
 
         return nll_po + nll_so
