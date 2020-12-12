@@ -318,10 +318,13 @@ class SCLProbabilityCoefficients(SCLTask):
         #iterate over unique cameratrap observation IDs
         ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
         for i in ct_ids:
-            df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
-                += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
-                    + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
-   
+            try:
+                df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
+                    += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
+                        + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
+            except:
+                print('missing camera trap grid cell')
+
         # iterate over unique set of surveys
         survey_ids = list(self.df_signsurvey.UniqueID.unique())
         for j in survey_ids:
@@ -438,6 +441,8 @@ class SCLProbabilityCoefficients(SCLTask):
             #self.df_cameratrap_dep.to_csv("ctdep.csv",encoding="utf-8")
             #self.df_cameratrap_obs.to_csv("ctobs.csv",encoding="utf-8")
             #self.df_cameratrap.to_csv("ct.csv",encoding="utf-8")
+            #self.df_adhoc.to_csv('adhoc.csv',encoding="utf-8")
+            #self.df_signsurvey.to_csv('signsurvey.csv',encoding="utf-8")
 
             #df_covars = self.get_covariates(gridname)
             #print(df_covars)
