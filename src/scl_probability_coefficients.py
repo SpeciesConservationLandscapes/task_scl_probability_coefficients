@@ -283,7 +283,6 @@ class SCLProbabilityCoefficients(SCLTask):
         return p
 
     # TODO: refactor par to use self.df_covars?
-    # TODO: replace po_data with self.df_adhoc (see below)
     # TODO: make sure neg_log_likelihood can account for no data, can have either sign or camera (must have at least 
     # one of these), account for no adhoc data
     def neg_log_likelihood_int(self, par):
@@ -306,20 +305,20 @@ class SCLProbabilityCoefficients(SCLTask):
         )
 
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        psi = 1.0 - np.exp(-lambda0)
+        self.psi = 1.0 - np.exp(-lambda0)
         tw = np.dot(np.array(self.po_detection_covars), alpha)
         p_thin = expit(tw)
 
-        zeta = np.empty((len(psi), 2))
-        zeta[:, 0] = 1.0 - psi
-        zeta[:, 1] = np.log(psi)
-        df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
+        zeta = np.empty((len(self.psi), 2))
+        zeta[:, 0] = 1.0 - self.psi
+        zeta[:, 1] = np.log(self.psi)
+        self.df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
 
         #iterate over unique cameratrap observation IDs
         ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
         for i in ct_ids:
             try:
-                df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
+                self.df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
                     += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
                         + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
             except KeyError:
@@ -328,101 +327,39 @@ class SCLProbabilityCoefficients(SCLTask):
         # iterate over unique set of surveys
         survey_ids = list(self.df_signsurvey.UniqueID.unique())
         for j in survey_ids:
-            df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
+            self.df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
                 += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
                     + (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["NumberOfReplicatesSurveyed"].values[0]- self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(1.0 - p_sign[self.Npsign - 1])
 
         known_sign = self.df_signsurvey.index[(self.df_signsurvey['detections']>0)].tolist()
         known_ct = self.df_cameratrap[self.df_cameratrap['detections']>0]['GridCellCode'].tolist()
         known_occurrences = list(set(known_sign+known_ct))
-        df_zeta.loc[known_occurrences, 'zeta0'] = 0
+        self.df_zeta.loc[known_occurrences, 'zeta0'] = 0
 
-        df_zeta["lik_so"] = df_zeta.loc[:,'zeta1']
-        df_zeta.loc[df_zeta.index[(df_zeta['zeta0']!=0)].tolist(),'lik_so']+= np.log(df_zeta.loc[df_zeta.index[(df_zeta['zeta0']!=0)].tolist(),'zeta0'])
-        df_zeta["lambda0"] = lambda0
-        df_zeta["pthin"] = p_thin
-        adhoc_indices=list(set(self.df_adhoc.index.values) & set(df_zeta.index.values)) 
-        nll_po = -1.0 * ((-1.0*sum(lambda0*p_thin))+sum(np.log(df_zeta.loc[adhoc_indices,'lambda0']*df_zeta.loc[adhoc_indices,'pthin'])))
-        nll_so = -1.0 * sum(df_zeta['lik_so'])
+        self.df_zeta["lik_so"] = self.df_zeta.loc[:,'zeta1']
+        self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'lik_so']+= np.log(self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'zeta0'])
+        self.df_zeta["lambda0"] = lambda0
+        self.df_zeta["pthin"] = p_thin
+        adhoc_indices=list(set(self.df_adhoc.index.values) & set(self.df_zeta.index.values)) 
+        nll_po = -1.0 * ((-1.0*sum(lambda0*p_thin))+sum(np.log(self.df_zeta.loc[adhoc_indices,'lambda0']*self.df_zeta.loc[adhoc_indices,'pthin'])))
+        nll_so = -1.0 * sum(self.df_zeta['lik_so'])
 
         return nll_po + nll_so
 
-    # TODO: DRY this up to avoid the repeated lines (should look like neg_log_likelihood_int after refactoring params)
     # TODO: predict_surface must account for no data
-    def predict_surface(self, par, CT, df_signsurvey, griddata):
+    def predict_surface(self):
         """Create predicted probability surface for each grid cell.
          Par: list of parameter values that have been optimized to convert to probability surface
-         Returns data frame that includes grid code, grid cell number and predicted probability surface for each grid
-         cell"""
+         Returns data frame indexed by grid cell code with predicted probability surface for each grid cell
+         and a ratio of conditional psi to unconditional psi"""
 
-        par = np.array(par)
-        beta = par[0: self.Nx]
-        p_sign = expit(par[self.Nx + self.Nw: self.Nx + self.Nw + self.Npsign])
-        p_cam = expit(
-            par[
-                self.Nx
-                + self.Nw
-                + self.Npsign: self.Nx
-                + self.Nw
-                + self.Npsign
-                + self.NpCT
-            ]
-        )
-        lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        psi = 1.0 - np.exp(-lambda0)
-        zeta = np.empty((len(psi), 2))
-        zeta[:, 0] = 1.0 - psi
-        zeta[:, 1] = np.log(psi)
+        #predicted probability surface
+        self.df_zeta["cond_psi"] = (np.exp(self.df_zeta.loc[:, 'zeta1'])) / (self.df_zeta.loc[:,'zeta0']+np.exp(self.df_zeta.loc[:,'zeta1'])) 
+        #ratio of conditional psi to unconditional psi, incorporates sampling effort
+        self.df_zeta["ratio_psi"] = self.psi / self.df_zeta.loc[:,'zeta0'] 
+        df_predictsurface = self.df_zeta.loc[:,['cond_psi','ratio_psi']]
 
-        for i in range(0, len(CT["det"])):
-            zeta[CT["cell"][i] - 1, 1] = (
-                zeta[CT["cell"][i] - 1, 1]
-                + (CT["det"][i]) * np.log(p_cam[CT["PI"][i] - 1])
-                + (CT["days"][i] - CT["det"][i]) * np.log(1.0 - p_cam[CT["PI"][i] - 1])
-            )
-
-        for j in range(0, len(df_signsurvey["detections"])):
-            zeta[df_signsurvey["cell"][j] - 1, 1] = (
-                zeta[df_signsurvey["cell"][j] - 1, 1]
-                + (df_signsurvey["detections"][j])
-                * np.log(p_sign[df_signsurvey["SignSurveyID"][j] - 1])
-                + (
-                    df_signsurvey["NumberOfReplicatesSurveyed"][j]
-                    - df_signsurvey["detections"][j]
-                )
-                * np.log(1.0 - p_sign[df_signsurvey["SignSurveyID"][j] - 1])
-            )
-
-        one = df_signsurvey[df_signsurvey["detections"] > 0]["cell"]
-        two = CT[CT["det"] > 0]["cell"]
-        known_occurrences = list(set(one.append(two)))
-
-        zeta[np.array(known_occurrences) - 1, 0] = 0
-        cond_psi = [(np.exp(zeta[i, 1])) / (zeta[i,0]+np.exp(zeta[i,1])) for i in range(0, len(psi))]
-
-        #ratio of conditional psi to unconditional psi
-        ratio_psi = [(psi[i, 1]) / (zeta[i,0]) for i in range(0, len(psi))]
-
-        gridcells = [i for i in range(1, len(psi) + 1)]
-        temp = {
-            self.cell_label: griddata[self.cell_label],
-            "gridcells": gridcells,
-            "condprob": cond_psi,
-        }
-        prob_out = pd.DataFrame(
-            temp, columns=[self.cell_label, "gridcells", "condprob"]
-        )
-
-        temp2 = {
-            self.cell_label: griddata[self.cell_label],
-            "gridcells": gridcells,
-            "ratiopsi": ratio_psi,
-        }
-        ratio_out = pd.DataFrame(
-            temp2, columns=[self.cell_label, "gridcells", "ratiopsi"]
-        )
-
-        return prob_out,ratio_out
+        return df_predictsurface
 
     def calc(self):
         prob_images = []
@@ -465,7 +402,8 @@ class SCLProbabilityCoefficients(SCLTask):
 
             m = self.pbso_integrated()
             print(m)
-            # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
+            probs = self.predict_surface()
+            print(probs)
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
