@@ -367,26 +367,29 @@ class SCLProbabilityCoefficients(SCLTask):
         for gridname in self.grids.keys():
             self._gridname = gridname
             self._reset_df_caches()
-            # just observations for this gridname, where cell labels can be used as index
+
+            #output empty dataframes to user
+            if self.df_adhoc.empty==True:
+                print("There are no adhoc data observations for grid",gridname,"during this time period.")
+            if self.df_signsurvey.empty==True:
+                print("There are no sign survey data observations for grid",gridname,"during this time period.")
+            if self.df_cameratrap.empty==True:
+                print("There are no camera trap data observations for grid",gridname,"during this time period.")
             #print(self.df_adhoc)
             #print(self.df_signsurvey)
-
             #print(self.df_cameratrap_dep)
             #print(self.df_cameratrap_obs)
             #print(self.df_cameratrap)
+            self.df_cameratrap.to_csv("ct.csv",encoding="utf-8")
+            self.df_adhoc.to_csv('adhoc.csv',encoding="utf-8")
+            self.df_signsurvey.to_csv('signsurvey.csv',encoding="utf-8")
 
-            #self.df_cameratrap_dep.to_csv("ctdep.csv",encoding="utf-8")
-            #self.df_cameratrap_obs.to_csv("ctobs.csv",encoding="utf-8")
-            #self.df_cameratrap.to_csv("ct.csv",encoding="utf-8")
-            #self.df_adhoc.to_csv('adhoc.csv',encoding="utf-8")
-            #self.df_signsurvey.to_csv('signsurvey.csv',encoding="utf-8")
-
-            #df_covars = self.get_covariates(gridname)
+            df_covars = self.get_covariates(gridname)
             #print(df_covars)
-            #df_covars.to_csv("covars.csv", encoding="utf-8")
-            df_covars = pd.read_csv(
-                "covars.csv", encoding="utf-8", index_col=self.cell_label
-            )
+            df_covars.to_csv("covars.csv", encoding="utf-8")
+            #df_covars = pd.read_csv(
+            #    "covars.csv", encoding="utf-8", index_col=self.cell_label
+            #)
 
             # TODO: set these dynamically
             self.Nx = 3
