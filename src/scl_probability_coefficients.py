@@ -246,8 +246,11 @@ class SCLProbabilityCoefficients(SCLTask):
 
         beta_names = list(self.presence_covars)
         beta_names[0] = "beta0"
-        alpha_names = list(self.po_detection_covars)
-        alpha_names[0] = "alpha0"
+        if self.df_adhoc.empty==False:
+            alpha_names = list(self.po_detection_covars)
+            alpha_names[0] = "alpha0"
+        else:
+            alpha_names=[]
         if self.df_signsurvey.empty==False:
             psign_names = [f"p_sign_{i}" for i in range(0, self.Npsign)]
         else:
@@ -297,7 +300,8 @@ class SCLProbabilityCoefficients(SCLTask):
          Returns single value of negative log-likelihood of function"""
 
         beta = par[0: self.Nx]
-        alpha = par[self.Nx: self.Nx + self.Nw]
+        if self.df_adhoc.empty==False:
+            alpha = par[self.Nx: self.Nx + self.Nw]
 
         if self.df_signsurvey.empty==False:
             p_sign = expit(par[self.Nx + self.Nw: self.Nx + self.Nw + self.Npsign])
@@ -306,11 +310,13 @@ class SCLProbabilityCoefficients(SCLTask):
 
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
         self.psi = 1.0 - np.exp(-lambda0)
-        tw = np.dot(np.array(self.po_detection_covars), alpha)
-        p_thin = expit(tw)
+        if self.df_adhoc.empty==False:
+            tw = np.dot(np.array(self.po_detection_covars), alpha)
+            p_thin = expit(tw)
 
         zeta = np.empty((len(self.psi), 2))
         zeta[:, 0] = 1.0 - self.psi
+        # TODO: handle RuntimeWarning divide by zero with log
         zeta[:, 1] = np.log(self.psi)
         self.df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
 
@@ -347,9 +353,14 @@ class SCLProbabilityCoefficients(SCLTask):
         self.df_zeta["lik_so"] = self.df_zeta.loc[:,'zeta1']
         self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'lik_so']+= np.log(self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'zeta0'])
         self.df_zeta["lambda0"] = lambda0
-        self.df_zeta["pthin"] = p_thin
-        adhoc_indices=list(set(self.df_adhoc.index.values) & set(self.df_zeta.index.values)) 
-        nll_po = -1.0 * ((-1.0*sum(lambda0*p_thin))+sum(np.log(self.df_zeta.loc[adhoc_indices,'lambda0']*self.df_zeta.loc[adhoc_indices,'pthin'])))
+
+        if self.df_adhoc.empty==False:
+            self.df_zeta["pthin"] = p_thin
+            adhoc_indices=list(set(self.df_adhoc.index.values) & set(self.df_zeta.index.values)) 
+            nll_po = -1.0 * ((-1.0*sum(lambda0*p_thin))+sum(np.log(self.df_zeta.loc[adhoc_indices,'lambda0']*self.df_zeta.loc[adhoc_indices,'pthin'])))
+        else:
+            nll_po = 0
+
         nll_so = -1.0 * sum(self.df_zeta['lik_so'])
 
         return nll_po + nll_so
@@ -411,7 +422,10 @@ class SCLProbabilityCoefficients(SCLTask):
             self.presence_covars = df_covars[["structural_habitat", "hii"]]
             self.presence_covars.insert(0, "Int", 1)
             self.Nx = self.presence_covars.shape[1]
-            self.Nw = self.po_detection_covars.shape[1]
+            if self.df_adhoc.empty==False:
+                self.Nw = self.po_detection_covars.shape[1]
+            else:
+                self.Nw = 0
 
             m = self.pbso_integrated()
             print(m)
