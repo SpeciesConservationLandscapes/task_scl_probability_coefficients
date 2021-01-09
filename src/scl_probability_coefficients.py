@@ -248,9 +248,16 @@ class SCLProbabilityCoefficients(SCLTask):
         beta_names[0] = "beta0"
         alpha_names = list(self.po_detection_covars)
         alpha_names[0] = "alpha0"
-        psign_names = [f"p_sign_{i}" for i in range(0, self.Npsign)]
-        pcam_names = [f"p_cam_{i}" for i in range(0, self.NpCT)]
+        if self.df_signsurvey.empty==False:
+            psign_names = [f"p_sign_{i}" for i in range(0, self.Npsign)]
+        else:
+            psign_names=[]
+        if self.df_cameratrap.empty==False:
+            pcam_names = [f"p_cam_{i}" for i in range(0, self.NpCT)]
+        else:
+            pcam_names=[]
         param_names = beta_names + alpha_names + psign_names + pcam_names
+
         # TODO: Should be able to remove the lines above and just get param_names from
         #  self.presence_covar.columns + self.po_detection_covars.columns
         #  assuming those dfs are formatted correctly (see note in calc())
@@ -283,8 +290,7 @@ class SCLProbabilityCoefficients(SCLTask):
         return p
 
     # TODO: refactor par to use self.df_covars?
-    # TODO: make sure neg_log_likelihood can account for no data, can have either sign or camera (must have at least 
-    # one of these), account for no adhoc data
+    # TODO: make sure neg_log_likelihood can account for no adhoc data
     def neg_log_likelihood_int(self, par):
         """Calculates the negative log-likelihood of the function.
          Par: array list of parameters to optimize
@@ -292,17 +298,11 @@ class SCLProbabilityCoefficients(SCLTask):
 
         beta = par[0: self.Nx]
         alpha = par[self.Nx: self.Nx + self.Nw]
-        p_sign = expit(par[self.Nx + self.Nw: self.Nx + self.Nw + self.Npsign])
-        p_cam = expit(
-            par[
-                self.Nx
-                + self.Nw
-                + self.Npsign: self.Nx
-                + self.Nw
-                + self.Npsign
-                + self.NpCT
-            ]
-        )
+
+        if self.df_signsurvey.empty==False:
+            p_sign = expit(par[self.Nx + self.Nw: self.Nx + self.Nw + self.Npsign])
+        if self.df_cameratrap.empty==False:
+            p_cam = expit(par[self.Nx + self.Nw + self.Npsign: self.Nx + self.Nw + self.Npsign + self.NpCT])
 
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
         self.psi = 1.0 - np.exp(-lambda0)
@@ -314,25 +314,33 @@ class SCLProbabilityCoefficients(SCLTask):
         zeta[:, 1] = np.log(self.psi)
         self.df_zeta = pd.DataFrame({"zeta0": zeta[:,0],"zeta1": zeta[:,1]}, index=self.presence_covars.index.copy())
 
-        #iterate over unique cameratrap observation IDs
-        ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
-        for i in ct_ids:
-            try:
-                self.df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
-                    += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
-                        + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
-            except KeyError:
-                print('missing camera trap grid cell')
+        #iterate over unique cameratrap observation IDs, if there are camera trap data
+        if self.df_cameratrap.empty==False:
+            ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
+            for i in ct_ids:
+                try:
+                    self.df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]['GridCellCode'].values[0],'zeta1'] \
+                        += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
+                            + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
+                except KeyError:
+                    print('missing camera trap grid cell')
+            
+            known_ct = self.df_cameratrap[self.df_cameratrap['detections']>0]['GridCellCode'].tolist()
+        else:
+            known_ct=[]
 
-        # iterate over unique set of surveys
-        survey_ids = list(self.df_signsurvey.UniqueID.unique())
-        for j in survey_ids:
-            self.df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
-                += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
-                    + (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["NumberOfReplicatesSurveyed"].values[0]- self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(1.0 - p_sign[self.Npsign - 1])
+        # iterate over unique set of surveys, if there are sign survey data
+        if self.df_signsurvey.empty==False:
+            survey_ids = list(self.df_signsurvey.UniqueID.unique())
+            for j in survey_ids:
+                self.df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
+                    += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
+                        + (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["NumberOfReplicatesSurveyed"].values[0]- self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(1.0 - p_sign[self.Npsign - 1])
 
-        known_sign = self.df_signsurvey.index[(self.df_signsurvey['detections']>0)].tolist()
-        known_ct = self.df_cameratrap[self.df_cameratrap['detections']>0]['GridCellCode'].tolist()
+            known_sign = self.df_signsurvey.index[(self.df_signsurvey['detections']>0)].tolist()
+        else:
+            known_sign=[]
+        
         known_occurrences = list(set(known_sign+known_ct))
         self.df_zeta.loc[known_occurrences, 'zeta0'] = 0
 
@@ -346,7 +354,6 @@ class SCLProbabilityCoefficients(SCLTask):
 
         return nll_po + nll_so
 
-    # TODO: predict_surface must account for no data
     def predict_surface(self):
         """Create predicted probability surface for each grid cell.
          Par: list of parameter values that have been optimized to convert to probability surface
@@ -368,13 +375,20 @@ class SCLProbabilityCoefficients(SCLTask):
             self._gridname = gridname
             self._reset_df_caches()
 
-            #output empty dataframes to user
+            # TODO: set these dynamically, right now assumes constant detection probability for sign survey and camera trap data
+            self.Npsign = 1
+            self.NpCT = 1
+
+            #output empty dataframes to user, modify sign survey and camera trap number of parameters
             if self.df_adhoc.empty==True:
                 print("There are no adhoc data observations for grid",gridname,"during this time period.")
             if self.df_signsurvey.empty==True:
                 print("There are no sign survey data observations for grid",gridname,"during this time period.")
+                self.Npsign = 0
             if self.df_cameratrap.empty==True:
                 print("There are no camera trap data observations for grid",gridname,"during this time period.")
+                self.NpCT = 0
+
             #print(self.df_adhoc)
             #print(self.df_signsurvey)
             #print(self.df_cameratrap_dep)
@@ -391,17 +405,13 @@ class SCLProbabilityCoefficients(SCLTask):
             #    "covars.csv", encoding="utf-8", index_col=self.cell_label
             #)
 
-            # TODO: set these dynamically
-            self.Nx = 3
-            self.Nw = 3
-            self.Npsign = 1
-            self.NpCT = 1
-
             self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
-            # # TODO: Why do we need the extra columns? Can 'alpha' and 'beta' be added to these dfs here?
+            # # TODO: Can 'alpha' and 'beta' be added to these dfs here?
             self.po_detection_covars.insert(0, "Int", 1)
             self.presence_covars = df_covars[["structural_habitat", "hii"]]
             self.presence_covars.insert(0, "Int", 1)
+            self.Nx = self.presence_covars.shape[1]
+            self.Nw = self.po_detection_covars.shape[1]
 
             m = self.pbso_integrated()
             print(m)
