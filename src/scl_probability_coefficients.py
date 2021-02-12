@@ -39,7 +39,9 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.set_aoi_from_ee("projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi")  # temporary
+        self.set_aoi_from_ee(
+            "projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi"
+        )  # temporary
 
         try:
             self.OBSDB_HOST = os.environ["OBSDB_HOST"]
@@ -69,8 +71,12 @@ class SCLProbabilityCoefficients(SCLTask):
         #  trap data
         self.Npsign = 1
         self.NpCT = 1
-        self.po_detection_covars = None  # coefficients relevant to presence-only and background detection only
-        self.presence_covars = None  # coefficients relevant to occupancy, shared across models
+        self.po_detection_covars = (
+            None
+        )  # coefficients relevant to presence-only and background detection only
+        self.presence_covars = (
+            None
+        )  # coefficients relevant to occupancy, shared across models
 
     def _reset_df_caches(self):
         self._df_adhoc = None
@@ -80,8 +86,10 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_ss = None
 
     def _get_df(self, query, index_field=cell_label):
-       
-        _scenario_clause = f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
+
+        _scenario_clause = (
+            f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
+        )
         if self.scenario and self.scenario != self.CANONICAL:
             _scenario_clause = f"AND ScenarioName = '{self.scenario}'"
 
@@ -308,7 +316,7 @@ class SCLProbabilityCoefficients(SCLTask):
          Par: array list of parameters to optimize
          Returns single value of negative log-likelihood of function"""
 
-        beta = par[0: self.Nx]
+        beta = par[0 : self.Nx]
         known_ct = []
         known_sign = []
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
@@ -332,7 +340,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 par[
                     self.Nx
                     + self.Nw
-                    + self.Npsign: self.Nx
+                    + self.Npsign : self.Nx
                     + self.Nw
                     + self.Npsign
                     + self.NpCT
@@ -342,35 +350,81 @@ class SCLProbabilityCoefficients(SCLTask):
             ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
             for i in ct_ids:
                 try:
-                    self.df_zeta.loc[self.df_cameratrap[self.df_cameratrap['UniqueID_y'] == i]['GridCellCode'].values[0],'zeta1'] \
-                        += (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(p_cam[self.NpCT - 1]) \
-                            + (self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["days"].values[0] - self.df_cameratrap[self.df_cameratrap['UniqueID_y']==i]["detections"].values[0]) * np.log(1.0 - p_cam[self.NpCT - 1])
+                    self.df_zeta.loc[
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "GridCellCode"
+                        ].values[0],
+                        "zeta1",
+                    ] += (
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "detections"
+                        ].values[0]
+                    ) * np.log(
+                        p_cam[self.NpCT - 1]
+                    ) + (
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "days"
+                        ].values[0]
+                        - self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "detections"
+                        ].values[0]
+                    ) * np.log(
+                        1.0 - p_cam[self.NpCT - 1]
+                    )
                 except KeyError:
                     print("missing camera trap grid cell")
 
-            known_ct = self.df_cameratrap[self.df_cameratrap['detections']>0]['GridCellCode'].tolist()
+            known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
+                "GridCellCode"
+            ].tolist()
 
         # iterate over unique set of surveys, if there are sign survey data
         if not self.df_signsurvey.empty:
-            p_sign = expit(par[self.Nx + self.Nw: self.Nx + self.Nw + self.Npsign])
+            p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
 
             survey_ids = list(self.df_signsurvey.UniqueID.unique())
             for j in survey_ids:
-                self.df_zeta.loc[self.df_signsurvey.index[(self.df_signsurvey['UniqueID']==j)].tolist()[0],'zeta1'] \
-                    += (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(p_sign[self.Npsign - 1]) \
-                        + (self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["NumberOfReplicatesSurveyed"].values[0]- self.df_signsurvey[self.df_signsurvey['UniqueID']==j]["detections"].values[0])* np.log(1.0 - p_sign[self.Npsign - 1])
+                self.df_zeta.loc[
+                    self.df_signsurvey.index[
+                        (self.df_signsurvey["UniqueID"] == j)
+                    ].tolist()[0],
+                    "zeta1",
+                ] += (
+                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "detections"
+                    ].values[0]
+                ) * np.log(
+                    p_sign[self.Npsign - 1]
+                ) + (
+                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "NumberOfReplicatesSurveyed"
+                    ].values[0]
+                    - self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "detections"
+                    ].values[0]
+                ) * np.log(
+                    1.0 - p_sign[self.Npsign - 1]
+                )
 
-            known_sign = self.df_signsurvey.index[(self.df_signsurvey['detections']>0)].tolist()
+            known_sign = self.df_signsurvey.index[
+                (self.df_signsurvey["detections"] > 0)
+            ].tolist()
 
         known_occurrences = list(set(known_sign + known_ct))
         self.df_zeta.loc[known_occurrences, "zeta0"] = 0
 
         self.df_zeta["lik_so"] = self.df_zeta.loc[:, "zeta1"]
-        self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'lik_so']+= np.log(self.df_zeta.loc[self.df_zeta.index[(self.df_zeta['zeta0']!=0)].tolist(),'zeta0'])
+        self.df_zeta.loc[
+            self.df_zeta.index[(self.df_zeta["zeta0"] != 0)].tolist(), "lik_so"
+        ] += np.log(
+            self.df_zeta.loc[
+                self.df_zeta.index[(self.df_zeta["zeta0"] != 0)].tolist(), "zeta0"
+            ]
+        )
         self.df_zeta["lambda0"] = lambda0
 
         if not self.df_adhoc.empty:
-            alpha = par[self.Nx: self.Nx + self.Nw]
+            alpha = par[self.Nx : self.Nx + self.Nw]
             tw = np.dot(np.array(self.po_detection_covars), alpha)
             p_thin = expit(tw)
             self.df_zeta["pthin"] = p_thin
@@ -408,12 +462,18 @@ class SCLProbabilityCoefficients(SCLTask):
 
             # output empty dataframes to user, modify sign survey and camera trap number of parameters
             if self.df_adhoc.empty:
-                print(f"There are no adhoc data observations for grid {gridname} during this time period.")
+                print(
+                    f"There are no adhoc data observations for grid {gridname} during this time period."
+                )
             if self.df_signsurvey.empty:
-                print(f"There are no sign survey data observations for grid {gridname} during this time period.")
+                print(
+                    f"There are no sign survey data observations for grid {gridname} during this time period."
+                )
                 self.Npsign = 0
             if self.df_cameratrap.empty:
-                print(f"There are no camera trap data observations for grid {gridname} during this time period.")
+                print(
+                    f"There are no camera trap data observations for grid {gridname} during this time period."
+                )
                 self.NpCT = 0
 
             # print(self.df_adhoc)
