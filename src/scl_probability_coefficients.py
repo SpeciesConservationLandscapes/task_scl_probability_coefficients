@@ -510,25 +510,28 @@ class SCLProbabilityCoefficients(SCLTask):
                 ]
             )
 
-            ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
+            # TODO: This seems ugly. See query refactoring note above; or, if we want to preserve the join within
+            #  pandas, maybe we can specify on the join using a class constant.
+            uniqueid_y = f"{self.UNIQUE_ID_LABEL}_y"
+            ct_ids = list(self.df_cameratrap[uniqueid_y].unique())
             for i in ct_ids:
                 try:
                     self.df_zeta.loc[
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
-                            "GridCellCode"
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                            self.MASTER_CELL_LABEL  # TODO: check with Jamie -- was GridCellCode
                         ].values[0],
                         "zeta1",
                     ] += (
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
                         p_cam[self.NpCT - 1]
                     ) + (
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "days"
                         ].values[0]
-                        - self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        - self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
@@ -538,31 +541,31 @@ class SCLProbabilityCoefficients(SCLTask):
                     print("missing camera trap grid cell")
 
             known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
-                "GridCellCode"
+                self.MASTER_CELL_LABEL  # TODO: check with Jamie -- was GridCellCode
             ].tolist()
 
         # iterate over unique set of surveys, if there are sign survey data
         if not self.df_signsurvey.empty:
             p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
 
-            survey_ids = list(self.df_signsurvey.UniqueID.unique())
+            survey_ids = list(self.df_signsurvey[self.UNIQUE_ID_LABEL].unique())
             for j in survey_ids:
                 self.df_zeta.loc[
                     self.df_signsurvey.index[
-                        (self.df_signsurvey["UniqueID"] == j)
+                        (self.df_signsurvey[self.UNIQUE_ID_LABEL] == j)
                     ].tolist()[0],
                     "zeta1",
                 ] += (
-                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "detections"
                     ].values[0]
                 ) * np.log(
                     p_sign[self.Npsign - 1]
                 ) + (
-                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "NumberOfReplicatesSurveyed"
                     ].values[0]
-                    - self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    - self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "detections"
                     ].values[0]
                 ) * np.log(
@@ -624,16 +627,16 @@ class SCLProbabilityCoefficients(SCLTask):
             # output empty dataframes to user, modify sign survey and camera trap number of parameters
             if self.df_adhoc.empty:
                 print(
-                    f"There are no adhoc data observations for grid {gridname} during this time period."
+                    f"There are no adhoc data observations for grid {self.zone} during this time period."
                 )
             if self.df_signsurvey.empty:
                 print(
-                    f"There are no sign survey data observations for grid {gridname} during this time period."
+                    f"There are no sign survey data observations for grid {self.zone} during this time period."
                 )
                 self.Npsign = 0
             if self.df_cameratrap.empty:
                 print(
-                    f"There are no camera trap data observations for grid {gridname} during this time period."
+                    f"There are no camera trap data observations for grid {self.zone} during this time period."
                 )
                 self.NpCT = 0
 
@@ -652,10 +655,10 @@ class SCLProbabilityCoefficients(SCLTask):
             #     "covars.csv", encoding="utf-8", index_col=self.cell_label
             # )
 
-            self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
+            self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
             # TODO: Can 'alpha' and 'beta' be added to these dfs here?
             self.po_detection_covars.insert(0, "Int", 1)
-            self.presence_covars = df_covars[["structural_habitat", "hii"]]
+            self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
             self.presence_covars.insert(0, "Int", 1)
             self.Nx = self.presence_covars.shape[1]
             if not self.df_adhoc.empty:
