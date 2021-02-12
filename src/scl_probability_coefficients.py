@@ -96,13 +96,16 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_adhoc = None
         self._df_ct_dep = None
         self._df_ct_obs = None
+        self._df_ct = None
         self._df_ss = None
         self._df_covars = None
         self.zone = None
         self.Nx = 0
         self.Nw = 0
-        self.Npsign = 0
-        self.NpCT = 0
+        # TODO: set these dynamically, right now assumes constant detection probability for sign survey and camera
+        #  trap data
+        self.Npsign = 1
+        self.NpCT = 1
         # coefficients relevant to presence-only and background detection only
         self.po_detection_covars = None
         # coefficients relevant to occupancy, shared across models
@@ -299,6 +302,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._df_ct_dep[self.MASTER_GRID_LABEL].astype(str) == self.zone
         ]
 
+    # TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime
     # This will be the same across all zones, because there is no way to look up master grids based on location.
     # The assumption is that this will be joined to self.df_cameratrap_dep, which is zone-filtered.
     @property
@@ -311,7 +315,26 @@ class SCLProbabilityCoefficients(SCLTask):
             )
             self._df_ct_obs = self._get_df(query)
             self._df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
+            self._df_ct_obs["detections"] = (
+                self._df_ct_obs["AdultMaleCount"]
+                + self._df_ct_obs["AdultFemaleCount"]
+                + self._df_ct_obs["AdultSexUnknownCount"]
+                + self._df_ct_obs["SubAdultCount"]
+                + self._df_ct_obs["YoungCount"]
+            )
+
         return self._df_ct_obs
+
+    @property
+    def df_cameratrap(self):
+        if self._df_ct is None:
+            self._df_ct = pd.merge(
+                left=self.df_cameratrap_dep,
+                right=self.df_cameratrap_obs,
+                left_index=True,
+                right_index=True,
+            )
+        return self._df_ct
 
     @property
     def df_signsurvey(self):
@@ -404,15 +427,25 @@ class SCLProbabilityCoefficients(SCLTask):
 
         beta_names = list(self.presence_covars)
         beta_names[0] = "beta0"
-        alpha_names = list(self.po_detection_covars)
-        alpha_names[0] = "alpha0"
-        psign_names = [f"p_sign_{i}" for i in range(0, self.Npsign)]
-        pcam_names = [f"p_cam_{i}" for i in range(0, self.NpCT)]
+        alpha_names = []
+        psign_names = []
+        pcam_names = []
+        if not self.df_adhoc.empty:
+            # TODO: set self.po_detection_covars and any other properties from __init__ so that code can run and
+            #  produce empty results (here we'd get `TypeError: 'NoneType' object is not iterable`)
+            alpha_names = list(self.po_detection_covars)
+            alpha_names[0] = "alpha0"
+        if not self.df_signsurvey.empty:
+            psign_names = [f"p_sign_{i}" for i in range(0, self.Npsign)]
+        if not self.df_cameratrap.empty:
+            pcam_names = [f"p_cam_{i}" for i in range(0, self.NpCT)]
         param_names = beta_names + alpha_names + psign_names + pcam_names
+
         # TODO: Should be able to remove the lines above and just get param_names from
         #  self.presence_covar.columns + self.po_detection_covars.columns
         #  assuming those dfs are formatted correctly (see note in calc())
         param_guess = np.zeros(len(param_names))
+        # TODO: Make sure convergence, a different method might be needed (can be tested outside of task)
         fit_pbso = minimize(
             self.neg_log_likelihood_int,
             param_guess,
@@ -420,6 +453,7 @@ class SCLProbabilityCoefficients(SCLTask):
             options={"gtol": 1e-08},
         )
         se_pbso = np.zeros(len(fit_pbso.x))
+        # TODO: Output Standard Error of parameter estimates when convergence occurs
         # if fit_pbso.success==True:
         #    se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
         tmp = {
@@ -427,6 +461,7 @@ class SCLProbabilityCoefficients(SCLTask):
             "Value": fit_pbso.x,
             "Standard error": se_pbso[0],
         }
+        # TODO: continue improving variable readability...
         p = {
             "coefs": pd.DataFrame(
                 tmp, columns=["Parameter name", "Value", "Standard error"]
@@ -438,177 +473,201 @@ class SCLProbabilityCoefficients(SCLTask):
         return p
 
     # TODO: refactor par to use self.df_covars?
-    # TODO: replace CT with self.df_* once we've figured out proper schema, and po_data with self.df_adhoc (see below)
-    def neg_log_likelihood_int(self, par, CT, po_data):
+    # TODO: make sure neg_log_likelihood can account for no adhoc data
+    def neg_log_likelihood_int(self, par):
         """Calculates the negative log-likelihood of the function.
          Par: array list of parameters to optimize
          Returns single value of negative log-likelihood of function"""
 
         beta = par[0 : self.Nx]
-        alpha = par[self.Nx : self.Nx + self.Nw]
-        p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
-        p_cam = expit(
-            par[
-                self.Nx
-                + self.Nw
-                + self.Npsign : self.Nx
-                + self.Nw
-                + self.Npsign
-                + self.NpCT
+        known_ct = []
+        known_sign = []
+        lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
+        # TODO: This should get initialized in __init__ so that predict_surface won't fail
+        self.psi = 1.0 - np.exp(-lambda0)
+        nll_po = 0
+
+        zeta = np.empty((len(self.psi), 2))
+        zeta[:, 0] = 1.0 - self.psi
+        # TODO: handle RuntimeWarning divide by zero with log
+        zeta[:, 1] = np.log(self.psi)
+        # TODO: same __init__ issue
+        self.df_zeta = pd.DataFrame(
+            {"zeta0": zeta[:, 0], "zeta1": zeta[:, 1]},
+            index=self.presence_covars.index.copy(),
+        )
+
+        # iterate over unique cameratrap observation IDs, if there are camera trap data
+        if not self.df_cameratrap.empty:
+            p_cam = expit(
+                par[
+                    self.Nx
+                    + self.Nw
+                    + self.Npsign : self.Nx
+                    + self.Nw
+                    + self.Npsign
+                    + self.NpCT
+                ]
+            )
+
+            ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
+            for i in ct_ids:
+                try:
+                    self.df_zeta.loc[
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "GridCellCode"
+                        ].values[0],
+                        "zeta1",
+                    ] += (
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "detections"
+                        ].values[0]
+                    ) * np.log(
+                        p_cam[self.NpCT - 1]
+                    ) + (
+                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "days"
+                        ].values[0]
+                        - self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                            "detections"
+                        ].values[0]
+                    ) * np.log(
+                        1.0 - p_cam[self.NpCT - 1]
+                    )
+                except KeyError:
+                    print("missing camera trap grid cell")
+
+            known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
+                "GridCellCode"
+            ].tolist()
+
+        # iterate over unique set of surveys, if there are sign survey data
+        if not self.df_signsurvey.empty:
+            p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
+
+            survey_ids = list(self.df_signsurvey.UniqueID.unique())
+            for j in survey_ids:
+                self.df_zeta.loc[
+                    self.df_signsurvey.index[
+                        (self.df_signsurvey["UniqueID"] == j)
+                    ].tolist()[0],
+                    "zeta1",
+                ] += (
+                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "detections"
+                    ].values[0]
+                ) * np.log(
+                    p_sign[self.Npsign - 1]
+                ) + (
+                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "NumberOfReplicatesSurveyed"
+                    ].values[0]
+                    - self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                        "detections"
+                    ].values[0]
+                ) * np.log(
+                    1.0 - p_sign[self.Npsign - 1]
+                )
+
+            known_sign = self.df_signsurvey.index[
+                (self.df_signsurvey["detections"] > 0)
+            ].tolist()
+
+        known_occurrences = list(set(known_sign + known_ct))
+        self.df_zeta.loc[known_occurrences, "zeta0"] = 0
+
+        self.df_zeta["lik_so"] = self.df_zeta.loc[:, "zeta1"]
+        self.df_zeta.loc[
+            self.df_zeta.index[(self.df_zeta["zeta0"] != 0)].tolist(), "lik_so"
+        ] += np.log(
+            self.df_zeta.loc[
+                self.df_zeta.index[(self.df_zeta["zeta0"] != 0)].tolist(), "zeta0"
             ]
         )
-        lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        self.df_adhoc["lambda0"] = lambda0
-        psi = 1.0 - np.exp(-lambda0)
-        tw = np.dot(np.array(self.po_detection_covars), alpha)
-        p_thin = expit(tw)
-        # TODO: up to this point we're using self.df_adhoc, indexed like all the others by self.cell_label.
-        #  But below we use po_data, which is a list of the nth rows in the (sorted) list of grid cell labels
-        #  We should refactor out po_data and just use self.df_adhoc, indexed by cell label.
-        self.df_adhoc["p_thin"] = p_thin
-        zeta = np.empty((len(psi), 2))
-        zeta[:, 0] = 1.0 - psi
-        zeta[:, 1] = np.log(psi)
+        self.df_zeta["lambda0"] = lambda0
 
-        # TODO: refactor out "cell": use self.cell_label
-        #  But need to understand CT structure in order to know how to group, either in sql or in df
-        #  CT.csv: # of detections (not sum of different kinds, apparently) per -- ?
-        #  Should CT start out as np.zeroes?
-        for i in range(0, len(CT["det"])):
-            zeta[CT["cell"][i] - 1, 1] = (
-                zeta[CT["cell"][i] - 1, 1]
-                + (CT["det"][i]) * np.log(p_cam[CT["PI"][i] - 1])
-                + (CT["days"][i] - CT["det"][i]) * np.log(1.0 - p_cam[CT["PI"][i] - 1])
+        if not self.df_adhoc.empty:
+            alpha = par[self.Nx : self.Nx + self.Nw]
+            tw = np.dot(np.array(self.po_detection_covars), alpha)
+            p_thin = expit(tw)
+            self.df_zeta["pthin"] = p_thin
+            # TODO: adhoc_indices is not used -- remove, or is something else missing?
+            adhoc_indices = list(
+                set(self.df_adhoc.index.values) & set(self.df_zeta.index.values)
             )
 
-        # iterate over unique set of surveys
-        survey_ids = list(self.df_signsurvey["SignSurveyID"].unique())
-        for j in survey_ids:
-            zeta[self.df_signsurvey[self.CELL_LABEL][j] - 1, 1] = (
-                zeta[self.df_signsurvey[self.CELL_LABEL][j] - 1, 1]
-                + (self.df_signsurvey["detections"][j])
-                * np.log(p_sign[self.df_signsurvey["SignSurveyID"][j] - 1])
-                + (
-                    self.df_signsurvey["NumberOfReplicatesSurveyed"][j]
-                    - self.df_signsurvey["detections"][j]
-                )
-                * np.log(1.0 - p_sign[self.df_signsurvey["SignSurveyID"][j] - 1])
-            )
+        nll_so = -1.0 * sum(self.df_zeta["lik_so"])
 
-        # TODO: make variable names more readable
-        one = self.df_signsurvey[self.df_signsurvey["detections"] > 0][self.CELL_LABEL]
-        two = CT[CT["det"] > 0][self.CELL_LABEL]
-        known_occurrences = list(set(one.append(two)))
+        return nll_po + nll_so
 
-        zeta[np.array(known_occurrences) - 1, 0] = 0
-
-        lik_so = []
-        for i in range(0, len(zeta[:, 0])):
-            if zeta[i, 0] == 0:
-                lik_so.append(zeta[i, 1])
-            else:
-                lik_so.append(np.log(zeta[i, 0]) + zeta[i, 1])
-
-        nll_po = -1.0 * (+sum(np.log(lambda0[po_data - 1] * p_thin[po_data - 1])))
-        nll_so = -1.0 * sum(lik_so)
-
-        return nll_po[0] + nll_so
-
-    # TODO: DRY this up to avoid the repeated lines (should look like neg_log_likelihood_int after refactoring params)
-    def predict_surface(self, par, CT, df_signsurvey, griddata):
+    def predict_surface(self):
         """Create predicted probability surface for each grid cell.
          Par: list of parameter values that have been optimized to convert to probability surface
-         Returns data frame that includes grid code, grid cell number and predicted probability surface for each grid
-         cell"""
+         Returns data frame indexed by grid cell code with predicted probability surface for each grid cell
+         and a ratio of conditional psi to unconditional psi"""
 
-        par = np.array(par)
-        beta = par[0 : self.Nx]
-        p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
-        p_cam = expit(
-            par[
-                self.Nx
-                + self.Nw
-                + self.Npsign : self.Nx
-                + self.Nw
-                + self.Npsign
-                + self.NpCT
-            ]
+        # predicted probability surface
+        self.df_zeta["cond_psi"] = (np.exp(self.df_zeta.loc[:, "zeta1"])) / (
+            self.df_zeta.loc[:, "zeta0"] + np.exp(self.df_zeta.loc[:, "zeta1"])
         )
-        lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        psi = 1.0 - np.exp(-lambda0)
-        zeta = np.empty((len(psi), 2))
-        zeta[:, 0] = 1.0 - psi
-        zeta[:, 1] = np.log(psi)
+        # ratio of conditional psi to unconditional psi, incorporates sampling effort
+        self.df_zeta["ratio_psi"] = self.psi / self.df_zeta.loc[:, "zeta0"]
+        df_predictsurface = self.df_zeta.loc[:, ["cond_psi", "ratio_psi"]]
 
-        for i in range(0, len(CT["det"])):
-            zeta[CT["cell"][i] - 1, 1] = (
-                zeta[CT["cell"][i] - 1, 1]
-                + (CT["det"][i]) * np.log(p_cam[CT["PI"][i] - 1])
-                + (CT["days"][i] - CT["det"][i]) * np.log(1.0 - p_cam[CT["PI"][i] - 1])
-            )
-
-        for j in range(0, len(df_signsurvey["detections"])):
-            zeta[df_signsurvey["cell"][j] - 1, 1] = (
-                zeta[df_signsurvey["cell"][j] - 1, 1]
-                + (df_signsurvey["detections"][j])
-                * np.log(p_sign[df_signsurvey["SignSurveyID"][j] - 1])
-                + (
-                    df_signsurvey["NumberOfReplicatesSurveyed"][j]
-                    - df_signsurvey["detections"][j]
-                )
-                * np.log(1.0 - p_sign[df_signsurvey["SignSurveyID"][j] - 1])
-            )
-
-        one = df_signsurvey[df_signsurvey["detections"] > 0]["cell"]
-        two = CT[CT["det"] > 0]["cell"]
-        known_occurrences = list(set(one.append(two)))
-
-        zeta[np.array(known_occurrences) - 1, 0] = 0
-        cond_psi = [zeta[i, 1] / sum(zeta[i, :]) for i in range(0, len(psi))]
-
-        cond_prob = 1.0 - (1.0 - np.exp(np.multiply(-1, cond_psi)))
-        gridcells = [i for i in range(1, len(psi) + 1)]
-        temp = {
-            self.CELL_LABEL: griddata[self.CELL_LABEL],
-            "gridcells": gridcells,
-            "condprob": cond_prob,
-        }
-        prob_out = pd.DataFrame(
-            temp, columns=[self.CELL_LABEL, "gridcells", "condprob"]
-        )
-
-        # TODO: return 2 dataframes: 1) conditional, 2) ratio of conditional to unconditional
-        return prob_out
+        return df_predictsurface
 
     def calc(self):
         # print(self.zone_ids)
         # prob_images = []
         for zone in self.zone_ids:
             self.zone = zone  # all dataframes are filtered by this
+            # output empty dataframes to user, modify sign survey and camera trap number of parameters
+            if self.df_adhoc.empty:
+                print(
+                    f"There are no adhoc data observations for grid {gridname} during this time period."
+                )
+            if self.df_signsurvey.empty:
+                print(
+                    f"There are no sign survey data observations for grid {gridname} during this time period."
+                )
+                self.Npsign = 0
+            if self.df_cameratrap.empty:
+                print(
+                    f"There are no camera trap data observations for grid {gridname} during this time period."
+                )
+                self.NpCT = 0
+
             # print(self.df_adhoc)
             # print(self.df_signsurvey)
             # print(self.df_cameratrap_dep)
             # print(self.df_cameratrap_obs)
+            # print(self.df_cameratrap)
+            self.df_cameratrap.to_csv("ct.csv", encoding="utf-8")
+            self.df_adhoc.to_csv("adhoc.csv", encoding="utf-8")
+            self.df_signsurvey.to_csv("signsurvey.csv", encoding="utf-8")
+
             # print(self.df_covars)
             # self.df_covars.to_csv("covars.csv", encoding="utf-8")
             # self.df_covars = pd.read_csv(
             #     "covars.csv", encoding="utf-8", index_col=self.cell_label
             # )
 
-            # TODO: set these dynamically
-            self.Nx = 3
-            self.Nw = 3
-            self.Npsign = 1
-            self.NpCT = 1
+            self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
+            # TODO: Can 'alpha' and 'beta' be added to these dfs here?
+            self.po_detection_covars.insert(0, "Int", 1)
+            self.presence_covars = df_covars[["structural_habitat", "hii"]]
+            self.presence_covars.insert(0, "Int", 1)
+            self.Nx = self.presence_covars.shape[1]
+            if not self.df_adhoc.empty:
+                self.Nw = self.po_detection_covars.shape[1]
+            else:
+                self.Nw = 0
 
-            # self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
-            # TODO: Why do we need the extra columns? Can 'alpha' and 'beta' be added to these dfs here?
-            # self.po_detection_covars.insert(0, "Int", 1)
-            # self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
-            # self.presence_covars.insert(0, "Int", 1)
-
-            # m = self.pbso_integrated()
-            # probs = self.predict_surface(m["coefs"]["Value"], df_cameratrap_dep, df_signsurvey, df_covars)
+            # TODO: set class properties instead of returning
+            m = self.pbso_integrated()
+            print(m)
+            probs = self.predict_surface()
+            print(probs)
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
