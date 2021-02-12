@@ -65,6 +65,7 @@ class SCLProbabilityCoefficients(SCLTask):
         self._df_ct_obs = None
         self._df_ct = None
         self._df_ss = None
+        
         self.Nx = 0
         self.Nw = 0
         # TODO: set these dynamically, right now assumes constant detection probability for sign survey and camera
@@ -270,6 +271,8 @@ class SCLProbabilityCoefficients(SCLTask):
         psign_names = []
         pcam_names = []
         if not self.df_adhoc.empty:
+            # TODO: set self.po_detection_covars and any other properties from __init__ so that code can run and
+            #  produce empty results (here we'd get `TypeError: 'NoneType' object is not iterable`)
             alpha_names = list(self.po_detection_covars)
             alpha_names[0] = "alpha0"
         if not self.df_signsurvey.empty:
