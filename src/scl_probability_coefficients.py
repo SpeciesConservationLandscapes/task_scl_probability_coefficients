@@ -33,7 +33,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
     google_creds_path = "/.google_creds"
     inputs = {
-        "obs_adhoc": {"maxage": 6},
+        "obs_adhoc": {"maxage": 100},
         "obs_ss": {"maxage": 6},
         "obs_ct": {"maxage": 6},
         "hii": {
@@ -601,11 +601,12 @@ class SCLProbabilityCoefficients(SCLTask):
 
         nll_so = -1.0 * sum(self.df_zeta["lik_so"])
 
+        # TODO: set maxage for all observations inputs to be large. This ensures we always have data.
+        #  THEN: enhance prob calcs to incorporate observation age
         return nll_po + nll_so
 
     def predict_surface(self):
         """Create predicted probability surface for each grid cell.
-         Par: list of parameter values that have been optimized to convert to probability surface
          Returns data frame indexed by grid cell code with predicted probability surface for each grid cell
          and a ratio of conditional psi to unconditional psi"""
 
@@ -624,7 +625,6 @@ class SCLProbabilityCoefficients(SCLTask):
         # prob_images = []
         for zone in self.zone_ids:
             self.zone = zone  # all dataframes are filtered by this
-            # output empty dataframes to user, modify sign survey and camera trap number of parameters
             if self.df_adhoc.empty:
                 print(
                     f"There are no adhoc data observations for grid {self.zone} during this time period."
@@ -645,9 +645,9 @@ class SCLProbabilityCoefficients(SCLTask):
             # print(self.df_cameratrap_dep)
             # print(self.df_cameratrap_obs)
             # print(self.df_cameratrap)
-            self.df_cameratrap.to_csv("ct.csv", encoding="utf-8")
-            self.df_adhoc.to_csv("adhoc.csv", encoding="utf-8")
-            self.df_signsurvey.to_csv("signsurvey.csv", encoding="utf-8")
+            self.df_cameratrap.to_csv(f"ct{self.zone}.csv", encoding="utf-8")
+            self.df_adhoc.to_csv(f"adhoc{self.zone}.csv", encoding="utf-8")
+            self.df_signsurvey.to_csv(f"signsurvey{self.zone}.csv", encoding="utf-8")
 
             # print(self.df_covars)
             # self.df_covars.to_csv("covars.csv", encoding="utf-8")
@@ -655,22 +655,22 @@ class SCLProbabilityCoefficients(SCLTask):
             #     "covars.csv", encoding="utf-8", index_col=self.cell_label
             # )
 
-            self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
-            # TODO: Can 'alpha' and 'beta' be added to these dfs here?
-            self.po_detection_covars.insert(0, "Int", 1)
-            self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
-            self.presence_covars.insert(0, "Int", 1)
-            self.Nx = self.presence_covars.shape[1]
-            if not self.df_adhoc.empty:
-                self.Nw = self.po_detection_covars.shape[1]
-            else:
-                self.Nw = 0
-
-            # TODO: set class properties instead of returning
-            m = self.pbso_integrated()
-            print(m)
-            probs = self.predict_surface()
-            print(probs)
+            # self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
+            # # TODO: Can 'alpha' and 'beta' be added to these dfs here?
+            # self.po_detection_covars.insert(0, "Int", 1)
+            # self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
+            # self.presence_covars.insert(0, "Int", 1)
+            # self.Nx = self.presence_covars.shape[1]
+            # if not self.df_adhoc.empty:
+            #     self.Nw = self.po_detection_covars.shape[1]
+            # else:
+            #     self.Nw = 0
+            #
+            # # TODO: set class properties instead of returning
+            # m = self.pbso_integrated()
+            # print(m)
+            # probs = self.predict_surface()
+            # print(probs)
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
