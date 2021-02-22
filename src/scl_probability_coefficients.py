@@ -594,9 +594,17 @@ class SCLProbabilityCoefficients(SCLTask):
             tw = np.dot(np.array(self.po_detection_covars), alpha)
             p_thin = expit(tw)
             self.df_zeta["pthin"] = p_thin
-            # TODO: adhoc_indices is not used -- remove, or is something else missing?
             adhoc_indices = list(
                 set(self.df_adhoc.index.values) & set(self.df_zeta.index.values)
+            )
+            nll_po = -1.0 * (
+                (-1.0 * sum(lambda0 * p_thin))
+                + sum(
+                    np.log(
+                        self.df_zeta.loc[adhoc_indices, "lambda0"]
+                        * self.df_zeta.loc[adhoc_indices, "pthin"]
+                    )
+                )
             )
 
         nll_so = -1.0 * sum(self.df_zeta["lik_so"])
