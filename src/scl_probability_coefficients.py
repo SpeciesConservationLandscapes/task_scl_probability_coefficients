@@ -32,10 +32,12 @@ class SCLProbabilityCoefficients(SCLTask):
     MASTERGRID_DF_COLUMNS = [UNIQUE_ID_LABEL, MASTER_GRID_LABEL, MASTER_CELL_LABEL]
 
     google_creds_path = "/.google_creds"
+    use_cache = True
+    save_cache = True  # only relevant when use_cache = False
     inputs = {
-        "obs_adhoc": {"maxage": 100},
-        "obs_ss": {"maxage": 6},
-        "obs_ct": {"maxage": 6},
+        "obs_adhoc": {"maxage": 50},
+        "obs_ss": {"maxage": 50},
+        "obs_ct": {"maxage": 50},
         "hii": {
             "ee_type": SCLTask.IMAGECOLLECTION,
             "ee_path": "projects/HII/v1/hii",
@@ -92,18 +94,14 @@ class SCLProbabilityCoefficients(SCLTask):
 
         self._zone_ids = []
         self._grids = {}
-        self._gridname = None
         self._df_adhoc = None
-        self._df_ct_dep = None
-        self._df_ct_obs = None
         self._df_ct = None
         self._df_ss = None
         self._df_covars = None
         self.zone = None
         self.Nx = 0
         self.Nw = 0
-        # TODO: set these dynamically, right now assumes constant detection probability for sign survey and camera
-        #  trap data
+        # TODO: set these dynamically; right now assumes constant detection probability for SS/CT data
         self.Npsign = 1
         self.NpCT = 1
         # coefficients relevant to presence-only and background detection only
@@ -177,7 +175,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
         return obs_feature
 
-    # add "master grid" and "master gridcell" to df
+    # add "mastergrid" and "mastergridcell" to df
     def zonify(self, df):
         obs_features = ee.FeatureCollection(
             [
@@ -274,79 +272,96 @@ class SCLProbabilityCoefficients(SCLTask):
     @property
     def df_adhoc(self):
         if self._df_adhoc is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_AdHocObservation "
-                f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
-                f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_adhoc = self._get_df(query)
-            self._df_adhoc = self.zonify(self._df_adhoc)
-            self._df_adhoc.set_index(self.MASTER_CELL_LABEL, inplace=True)
+            _csvpath = "adhoc.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_adhoc = pd.read_csv(_csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL)
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_AdHocObservation "
+                    f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
+                    f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
+                )
+                self._df_adhoc = self._get_df(query)
+                print("zonify adhoc")
+                self._df_adhoc = self.zonify(self._df_adhoc)
+                self._df_adhoc.set_index(self.MASTER_CELL_LABEL, inplace=True)
+
+                if self.save_cache and not self._df_adhoc.empty:
+                    self._df_adhoc.to_csv(_csvpath, encoding="utf-8")
+
         return self._df_adhoc[
             self._df_adhoc[self.MASTER_GRID_LABEL].astype(str) == self.zone
         ]
 
-    # TODO: refactor these CT dfs once we figure out new schema (use adhoc/ss as recipe)
-    @property
-    def df_cameratrap_dep(self):
-        if self._df_ct_dep is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
-                f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ct_dep = self._get_df(query)
-            self._df_ct_dep = self.zonify(self._df_ct_dep)
-            self._df_ct_dep.set_index("CameraTrapDeploymentID", inplace=True)
-        return self._df_ct_dep[
-            self._df_ct_dep[self.MASTER_GRID_LABEL].astype(str) == self.zone
-        ]
-
-    # TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime
-    # This will be the same across all zones, because there is no way to look up master grids based on location.
-    # The assumption is that this will be joined to self.df_cameratrap_dep, which is zone-filtered.
-    @property
-    def df_cameratrap_obs(self):
-        if self._df_ct_obs is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
-                f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ct_obs = self._get_df(query)
-            self._df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
-            self._df_ct_obs["detections"] = (
-                self._df_ct_obs["AdultMaleCount"]
-                + self._df_ct_obs["AdultFemaleCount"]
-                + self._df_ct_obs["AdultSexUnknownCount"]
-                + self._df_ct_obs["SubAdultCount"]
-                + self._df_ct_obs["YoungCount"]
-            )
-
-        return self._df_ct_obs
-
     @property
     def df_cameratrap(self):
         if self._df_ct is None:
-            self._df_ct = pd.merge(
-                left=self.df_cameratrap_dep,
-                right=self.df_cameratrap_obs,
-                left_index=True,
-                right_index=True,
-            )
-        return self._df_ct
+            _csvpath = "cameratrap.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_ct = pd.read_csv(_csvpath, encoding="utf-8", index_col="CameraTrapDeploymentID")
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
+                    f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
+                    f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
+                )
+                _df_ct_dep = self._get_df(query)
+                print("zonify camera trap deployments")
+                _df_ct_dep = self.zonify(_df_ct_dep)
+                _df_ct_dep.set_index("CameraTrapDeploymentID", inplace=True)
+
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
+                    f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= "
+                    f"{self.inputs['obs_ct']['maxage']} "
+                    f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
+                )
+                _df_ct_obs = self._get_df(query)
+                # No location for CT observations, so no mastergridcell.
+                # TODO: Should this join be done on the db side?
+                _df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
+                _df_ct_obs["detections"] = (
+                        _df_ct_obs["AdultMaleCount"]
+                        + _df_ct_obs["AdultFemaleCount"]
+                        + _df_ct_obs["AdultSexUnknownCount"]
+                        + _df_ct_obs["SubAdultCount"]
+                        + _df_ct_obs["YoungCount"]
+                )
+
+                # inner join -- we get only dep ids with observations
+                self._df_ct = pd.merge(
+                    left=_df_ct_dep,
+                    right=_df_ct_obs,
+                    left_index=True,
+                    right_index=True,
+                )
+                if self.save_cache and not self._df_ct.empty:
+                    self._df_ct.to_csv(_csvpath, encoding="utf-8")
+
+        return self._df_ct[
+            self._df_ct[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
     @property
     def df_signsurvey(self):
         if self._df_ss is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
-                f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
-                f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ss = self._get_df(query)
-            self._df_ss = self.zonify(self._df_ss)
-            self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
+            _csvpath = "signsurvey.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_ss = pd.read_csv(_csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL)
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
+                    f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
+                    f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
+                )
+                self._df_ss = self._get_df(query)
+                print("zonify sign survey")
+                self._df_ss = self.zonify(self._df_ss)
+                self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
+
+                if self.save_cache and not self._df_ss.empty:
+                    self._df_ss.to_csv(_csvpath, encoding="utf-8")
+
         return self._df_ss[self._df_ss[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
     def tri(self, dem, scale):
@@ -361,55 +376,65 @@ class SCLProbabilityCoefficients(SCLTask):
     @property
     def df_covars(self):
         if self._df_covars is None:
-            sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
-            hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
-            dem = ee.Image(self.inputs["dem"]["ee_path"])
-            # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
-            roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
-
-            structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
-            hii, hii_date = self.get_most_recent_image(hii_ic)
-            tri = self.tri(dem, 90)
-            distance_to_roads = roads.distance().clipToCollection(self.zones)
-
-            if structural_habitat and hii:
-                covariates_bands = (
-                    structural_habitat.rename("structural_habitat")
-                    .addBands(hii.rename("hii"))
-                    .addBands(tri.rename("tri"))
-                    .addBands(distance_to_roads.rename("distance_to_roads"))
+            _csvpath = "covars.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_covars = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
                 )
-                covariates_fc = covariates_bands.reduceRegions(
-                    collection=self.gridcells,
-                    reducer=ee.Reducer.mean(),
-                    scale=self.scale,
-                    crs=self.crs,
-                )
-                self._df_covars = self.fc2df(covariates_fc)
-
-                if self._df_covars.empty:
-                    self._df_covars[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
-                    self._df_covars[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
-                else:
-                    self._df_covars.rename(
-                        {"zone": self.MASTER_GRID_LABEL, "id": self.MASTER_CELL_LABEL},
-                        axis=1,
-                        inplace=True,
-                    )
-                    # covar_stats = self._df_covars.describe()
-                    # TODO: determine whether we need this anymore
-                    #  at master grid level. If we do, need to change the logic for choosing which columns to modify.
-                    # for col in covar_stats.columns:
-                    #     if not col.startswith("Unnamed"):
-                    #         self._df_covars[col] = (
-                    #             self._df_covars[col] - covar_stats[col]["mean"]
-                    #         ) / covar_stats[col]["std"]
-
-                # TODO: check this -- means no row for any cell with ANY missing covars
-                # self._df_covars = self._df_covars.dropna()
-                self._df_covars.set_index(self.MASTER_CELL_LABEL, inplace=True)
             else:
-                return None
+                sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
+                hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
+                dem = ee.Image(self.inputs["dem"]["ee_path"])
+                # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
+                roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
+
+                structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
+                hii, hii_date = self.get_most_recent_image(hii_ic)
+                tri = self.tri(dem, 90)
+                distance_to_roads = roads.distance().clipToCollection(self.zones)
+
+                if structural_habitat and hii:
+                    covariates_bands = (
+                        structural_habitat.rename("structural_habitat")
+                        .addBands(hii.rename("hii"))
+                        .addBands(tri.rename("tri"))
+                        .addBands(distance_to_roads.rename("distance_to_roads"))
+                    )
+                    covariates_fc = covariates_bands.reduceRegions(
+                        collection=self.gridcells,
+                        reducer=ee.Reducer.mean(),
+                        scale=self.scale,
+                        crs=self.crs,
+                    )
+                    self._df_covars = self.fc2df(covariates_fc)
+
+                    if self._df_covars.empty:
+                        self._df_covars[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
+                        self._df_covars[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
+                    else:
+                        self._df_covars.rename(
+                            {"zone": self.MASTER_GRID_LABEL, "id": self.MASTER_CELL_LABEL},
+                            axis=1,
+                            inplace=True,
+                        )
+                        # covar_stats = self._df_covars.describe()
+                        # TODO: determine whether we need this anymore
+                        #  at master grid level. If we do, need to change the logic for choosing which columns to modify.
+                        # for col in covar_stats.columns:
+                        #     if not col.startswith("Unnamed"):
+                        #         self._df_covars[col] = (
+                        #             self._df_covars[col] - covar_stats[col]["mean"]
+                        #         ) / covar_stats[col]["std"]
+
+                    # TODO: check this -- means no row for any cell with ANY missing covars
+                    # self._df_covars = self._df_covars.dropna()
+                    self._df_covars.set_index(self.MASTER_CELL_LABEL, inplace=True)
+
+                    if self.save_cache and not self._df_covars.empty:
+                        self._df_covars.to_csv(_csvpath, encoding="utf-8")
+                else:
+                    return None
+
         return self._df_covars[
             self._df_covars[self.MASTER_GRID_LABEL].astype(str) == self.zone
         ]
@@ -513,6 +538,7 @@ class SCLProbabilityCoefficients(SCLTask):
             # TODO: This seems ugly. See query refactoring note above; or, if we want to preserve the join within
             #  pandas, maybe we can specify on the join using a class constant.
             uniqueid_y = f"{self.UNIQUE_ID_LABEL}_y"
+            # ct_ids is a list of CT obs unique ids, not deployment ids
             ct_ids = list(self.df_cameratrap[uniqueid_y].unique())
             for i in ct_ids:
                 try:
@@ -537,8 +563,9 @@ class SCLProbabilityCoefficients(SCLTask):
                     ) * np.log(
                         1.0 - p_cam[self.NpCT - 1]
                     )
-                except KeyError:
-                    print("missing camera trap grid cell")
+                except KeyError as e:
+                    # pass
+                    print(f"df_zeta has no row with {self.MASTER_CELL_LABEL} = {e}")
 
             known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
                 self.MASTER_CELL_LABEL  # TODO: check with Jamie -- was GridCellCode
@@ -609,8 +636,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
         nll_so = -1.0 * sum(self.df_zeta["lik_so"])
 
-        # TODO: set maxage for all observations inputs to be large. This ensures we always have data.
-        #  THEN: enhance prob calcs to incorporate observation age
+        # TODO: enhance prob calcs to incorporate observation age
         return nll_po + nll_so
 
     def predict_surface(self):
@@ -629,56 +655,59 @@ class SCLProbabilityCoefficients(SCLTask):
         return df_predictsurface
 
     def calc(self):
-        # print(self.zone_ids)
         # prob_images = []
         for zone in self.zone_ids:
             self.zone = zone  # all dataframes are filtered by this
+            self.Nx = 0
+            self.Nw = 0
+            # TODO: set these dynamically; right now assumes constant detection probability for SS/CT data
+            self.Npsign = 1
+            self.NpCT = 1
+
             if self.df_adhoc.empty:
                 print(
-                    f"There are no adhoc data observations for grid {self.zone} during this time period."
+                    f"No adhoc data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_adhoc']['maxage']} years prior to {self.taskdate}."
                 )
             if self.df_signsurvey.empty:
                 print(
-                    f"There are no sign survey data observations for grid {self.zone} during this time period."
+                    f"No sign survey data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_ss']['maxage']} years prior to {self.taskdate}."
                 )
                 self.Npsign = 0
             if self.df_cameratrap.empty:
                 print(
-                    f"There are no camera trap data observations for grid {self.zone} during this time period."
+                    f"No camera trap data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_ct']['maxage']} years prior to {self.taskdate}."
                 )
                 self.NpCT = 0
 
-            # print(self.df_adhoc)
-            # print(self.df_signsurvey)
-            # print(self.df_cameratrap_dep)
-            # print(self.df_cameratrap_obs)
-            # print(self.df_cameratrap)
-            self.df_cameratrap.to_csv(f"ct{self.zone}.csv", encoding="utf-8")
-            self.df_adhoc.to_csv(f"adhoc{self.zone}.csv", encoding="utf-8")
-            self.df_signsurvey.to_csv(f"signsurvey{self.zone}.csv", encoding="utf-8")
+            # We need observations from at least one observation type per zone
+            if self.df_signsurvey.empty and self.df_cameratrap.empty:
+                print(f"No structured data for zone {self.zone}")
+                continue
+            # TODO: ensure we have at least some structured data for every zone, and then uncomment these lines and
+            #  remove the preceding two, so that task fails if no structured data for ANY zone.
+            #     self.status = self.FAILED
+            #     raise NotImplementedError("Probability calculation without structured data is not defined.")
 
-            # print(self.df_covars)
-            # self.df_covars.to_csv("covars.csv", encoding="utf-8")
-            # self.df_covars = pd.read_csv(
-            #     "covars.csv", encoding="utf-8", index_col=self.cell_label
-            # )
+            self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
+            # TODO: Can 'alpha' and 'beta' be added to these dfs here?
+            self.po_detection_covars.insert(0, "Int", 1)
+            self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
+            self.presence_covars.insert(0, "Int", 1)
+            # TODO: test for a non-empty df here? Or does the structured data test above cover it?
+            self.Nx = self.presence_covars.shape[1]
+            if not self.df_adhoc.empty:
+                self.Nw = self.po_detection_covars.shape[1]
 
-            # self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
-            # # TODO: Can 'alpha' and 'beta' be added to these dfs here?
-            # self.po_detection_covars.insert(0, "Int", 1)
-            # self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
-            # self.presence_covars.insert(0, "Int", 1)
-            # self.Nx = self.presence_covars.shape[1]
-            # if not self.df_adhoc.empty:
-            #     self.Nw = self.po_detection_covars.shape[1]
-            # else:
-            #     self.Nw = 0
-            #
-            # # TODO: set class properties instead of returning
-            # m = self.pbso_integrated()
-            # print(m)
-            # probs = self.predict_surface()
-            # print(probs)
+            # TODO: set class properties instead of returning
+            m = self.pbso_integrated()
+            print(m)
+            probs = self.predict_surface()
+            print(probs)
+            # TODO: save probability and survey effort grids for this zone
+            print(f"Produced outputs for zone {self.zone}")
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
