@@ -318,7 +318,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 )
                 _df_ct_obs = self._get_df(query)
                 # No location for CT observations, so no mastergridcell.
-                # TODO: Should this join be done on the db side?
+                # TODO: eliminate duplicate observations with same dep id and timestamp
                 _df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
                 _df_ct_obs["detections"] = (
                         _df_ct_obs["AdultMaleCount"]
@@ -328,7 +328,6 @@ class SCLProbabilityCoefficients(SCLTask):
                         + _df_ct_obs["YoungCount"]
                 )
 
-                # inner join -- we get only dep ids with observations
                 self._df_ct = pd.merge(
                     left=_df_ct_dep,
                     right=_df_ct_obs,
@@ -391,7 +390,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
                 hii, hii_date = self.get_most_recent_image(hii_ic)
                 tri = self.tri(dem, 90)
-                distance_to_roads = roads.distance().clipToCollection(self.zones)
+                distance_to_roads = roads.distance().clipToCollection(self.gridcells)
 
                 if structural_habitat and hii:
                     covariates_bands = (
@@ -706,7 +705,13 @@ class SCLProbabilityCoefficients(SCLTask):
             print(m)
             probs = self.predict_surface()
             print(probs)
+            probs.to_csv(f"probs{self.zone}.csv")
             # TODO: save probability and survey effort grids for this zone
+            # create df with mastergridcell, cond_psi, geo
+            # df_probability =
+            # create fc from df, then do reduceToImage/rename like below
+            # projects/SCL/v1/Panthera_tigris/canonical/probability_2 <- zone depends on how we decide to merge zones
+            # repeat for mastergridcell, ratio_psi, geo
             print(f"Produced outputs for zone {self.zone}")
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
