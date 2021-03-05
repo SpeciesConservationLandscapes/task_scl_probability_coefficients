@@ -285,12 +285,12 @@ class SCLProbabilityCoefficients(SCLTask):
         #  self.presence_covar.columns + self.po_detection_covars.columns
         #  assuming those dfs are formatted correctly (see note in calc())
         param_guess = np.zeros(len(param_names))
-        # TODO: Make sure convergence, a different method might be needed (can be tested outside of task)
+        
         fit_pbso = minimize(
             self.neg_log_likelihood_int,
             param_guess,
             method="BFGS",
-            options={"gtol": 1e-08},
+            options={"gtol": 1},
         )
         se_pbso = np.zeros(len(fit_pbso.x))
         # TODO: Output Standard Error of parameter estimates when convergence occurs
