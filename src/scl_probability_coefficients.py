@@ -1,12 +1,16 @@
 import argparse
 import ee
 import os
+import re
+import subprocess
 import numpy as np
 import pandas as pd
 import pyodbc
 import time
 import uuid
+import json
 from datetime import datetime, timezone
+from typing import List, Optional, Union
 from geomet import wkt
 from google.cloud.storage import Client
 from google.cloud.exceptions import NotFound
@@ -14,6 +18,10 @@ from pathlib import Path
 from scipy.optimize import minimize
 from scipy.special import expit
 from task_base import SCLTask
+
+
+class ConversionException(Exception):
+    pass
 
 
 class SCLProbabilityCoefficients(SCLTask):
@@ -43,7 +51,13 @@ class SCLProbabilityCoefficients(SCLTask):
             "ee_path": "projects/HII/v1/hii",
             "maxage": 30,
         },
-        "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
+        "tri": {
+            "ee_type": SCLTask.IMAGE,
+            "ee_path": "projects/SCL/v1/tri_aster",
+            "static": True,
+        },
+        # original dynamic calculation of tri from this dem using method below
+        # "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
         # TODO: replace with roads from OSM and calculate distance
         "roads": {
             "ee_type": SCLTask.FEATURECOLLECTION,
@@ -52,7 +66,7 @@ class SCLProbabilityCoefficients(SCLTask):
         },
         "structural_habitat": {
             "ee_type": SCLTask.IMAGECOLLECTION,
-            "ee_path": "projects/SCL/v1/Panthera_tigris/structural_habitat",
+            "ee_path": "projects/SCL/v1/Panthera_tigris/canonical/structural_habitat",
             "maxage": 10,  # until we have full-range SH for every year
         },
         "zones": {
@@ -120,6 +134,13 @@ class SCLProbabilityCoefficients(SCLTask):
         blob.download_to_filename(local_path)
         return local_path
 
+    def _upload_to_cloudstorage(self, local_path: str, blob_path: str) -> str:
+        client = Client()
+        bucket = client.bucket(self.BUCKET)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(local_path, timeout=3600)
+        return blob_path
+
     def _remove_from_cloudstorage(self, blob_path: str):
         client = Client()
         bucket = client.bucket(self.BUCKET)
@@ -127,6 +148,44 @@ class SCLProbabilityCoefficients(SCLTask):
             bucket.delete_blob(blob_path)
         except NotFound:
             print(f"{blob_path} not found")
+
+    def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
+        if isinstance(output, bytes):
+            text = output.decode("utf-8")
+        else:
+            text = output
+
+        task_id_regex = re.compile(r"(?<=ID: ).*", flags=re.IGNORECASE)
+        try:
+            matches = task_id_regex.search(text)
+            if matches is None:
+                return None
+            return matches[0]
+        except TypeError:
+            return None
+
+    def _cp_storage_to_ee_table(
+        self, blob_uri: str, table_asset_id: str, geofield: str = "geom"
+    ) -> str:
+        try:
+            cmd = [
+                "/usr/local/bin/earthengine",
+                f"--service_account_file={self.google_creds_path}",
+                "upload table",
+                f"--primary_geometry_column {geofield}",
+                f"--asset_id={table_asset_id}",
+                blob_uri,
+            ]
+            output = subprocess.check_output(
+                " ".join(cmd), stderr=subprocess.STDOUT, shell=True
+            )
+            task_id = self._parse_task_id(output)
+            if task_id is None:
+                raise TypeError("task_id is None")
+            self.ee_tasks[task_id] = {}
+            return task_id
+        except subprocess.CalledProcessError as err:
+            raise ConversionException(err.stdout)
 
     def _get_df(self, query):
         _scenario_clause = (
@@ -217,9 +276,14 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def fc2df(self, featurecollection, columns=None):
         df = pd.DataFrame()
-        fcsize = featurecollection.size().getInfo()
+        fc_exists = False
+        try:
+            _fc_exists = featurecollection.first().getInfo()
+            fc_exists = True
+        except ee.ee_exception.EEException as e:
+            pass
 
-        if fcsize > 0:
+        if fc_exists:
             tempfile = str(uuid.uuid4())
             blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
             task_id = self.export_fc_cloudstorage(
@@ -227,7 +291,7 @@ class SCLProbabilityCoefficients(SCLTask):
             )
             self.wait()
             csv = self._download_from_cloudstorage(f"{blob}.csv", f"{tempfile}.csv")
-            self.fc_csvs.append(csv)
+            self.fc_csvs.append((f"{tempfile}.csv", None))
 
             # uncomment to export shp for QA
             # shp_task_id = self.export_fc_cloudstorage(
@@ -237,6 +301,24 @@ class SCLProbabilityCoefficients(SCLTask):
             df = pd.read_csv(csv, encoding="utf-8")
             self._remove_from_cloudstorage(f"{blob}.csv")
         return df
+
+    def df2fc(self, df: pd.DataFrame, geofield: str = "geom") -> Optional[ee.FeatureCollection]:
+        tempfile = str(uuid.uuid4())
+        blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
+        if df.empty:
+            return None
+
+        df.replace(np.inf, 0, inplace=True)
+        df.to_csv(f"{tempfile}.csv", encoding="utf-8")
+        self._upload_to_cloudstorage(f"{tempfile}.csv", f"{blob}.csv")
+        table_asset_name, table_asset_id = self._prep_asset_id(f"scratch/{tempfile}")
+        task_id = self._cp_storage_to_ee_table(
+            f"gs://{self.BUCKET}/{blob}.csv", table_asset_id, geofield
+        )
+        self.wait()
+        self._remove_from_cloudstorage(f"{blob}.csv")
+        self.fc_csvs.append((f"{tempfile}.csv", table_asset_id))
+        return ee.FeatureCollection(table_asset_id)
 
     @property
     def user_grids(self):
@@ -274,7 +356,9 @@ class SCLProbabilityCoefficients(SCLTask):
         if self._df_adhoc is None:
             _csvpath = "adhoc.csv"
             if self.use_cache and Path(_csvpath).is_file():
-                self._df_adhoc = pd.read_csv(_csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL)
+                self._df_adhoc = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
+                )
             else:
                 query = (
                     f"SELECT * FROM dbo.vw_CI_AdHocObservation "
@@ -298,7 +382,9 @@ class SCLProbabilityCoefficients(SCLTask):
         if self._df_ct is None:
             _csvpath = "cameratrap.csv"
             if self.use_cache and Path(_csvpath).is_file():
-                self._df_ct = pd.read_csv(_csvpath, encoding="utf-8", index_col="CameraTrapDeploymentID")
+                self._df_ct = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col="CameraTrapDeploymentID"
+                )
             else:
                 query = (
                     f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
@@ -321,32 +407,29 @@ class SCLProbabilityCoefficients(SCLTask):
                 # TODO: eliminate duplicate observations with same dep id and timestamp
                 _df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
                 _df_ct_obs["detections"] = (
-                        _df_ct_obs["AdultMaleCount"]
-                        + _df_ct_obs["AdultFemaleCount"]
-                        + _df_ct_obs["AdultSexUnknownCount"]
-                        + _df_ct_obs["SubAdultCount"]
-                        + _df_ct_obs["YoungCount"]
+                    _df_ct_obs["AdultMaleCount"]
+                    + _df_ct_obs["AdultFemaleCount"]
+                    + _df_ct_obs["AdultSexUnknownCount"]
+                    + _df_ct_obs["SubAdultCount"]
+                    + _df_ct_obs["YoungCount"]
                 )
 
                 self._df_ct = pd.merge(
-                    left=_df_ct_dep,
-                    right=_df_ct_obs,
-                    left_index=True,
-                    right_index=True,
+                    left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True
                 )
                 if self.save_cache and not self._df_ct.empty:
                     self._df_ct.to_csv(_csvpath, encoding="utf-8")
 
-        return self._df_ct[
-            self._df_ct[self.MASTER_GRID_LABEL].astype(str) == self.zone
-        ]
+        return self._df_ct[self._df_ct[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
     @property
     def df_signsurvey(self):
         if self._df_ss is None:
             _csvpath = "signsurvey.csv"
             if self.use_cache and Path(_csvpath).is_file():
-                self._df_ss = pd.read_csv(_csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL)
+                self._df_ss = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
+                )
             else:
                 query = (
                     f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
@@ -363,12 +446,12 @@ class SCLProbabilityCoefficients(SCLTask):
 
         return self._df_ss[self._df_ss[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
-    def tri(self, dem, scale):
-        neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
-        diff = dem.subtract(neighbors)
-        sq = diff.multiply(diff)
-        tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
-        return tri
+    # def tri(self, dem, scale):
+    #     neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
+    #     diff = dem.subtract(neighbors)
+    #     sq = diff.multiply(diff)
+    #     tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
+    #     return tri
 
     # Probably we need more sophisticated covariate definitions (mode of rounded cell vals?)
     # or to sample using smaller gridcell geometries
@@ -383,18 +466,20 @@ class SCLProbabilityCoefficients(SCLTask):
             else:
                 sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
                 hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
-                dem = ee.Image(self.inputs["dem"]["ee_path"])
+                tri = ee.Image(self.inputs["tri"]["ee_path"])
                 # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
                 roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
 
                 structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
                 hii, hii_date = self.get_most_recent_image(hii_ic)
-                tri = self.tri(dem, 90)
                 distance_to_roads = roads.distance().clipToCollection(self.gridcells)
 
                 if structural_habitat and hii:
                     covariates_bands = (
+                        # updateMask(hii) just eliminates water Nones
                         structural_habitat.rename("structural_habitat")
+                        .unmask(0)
+                        .updateMask(hii)
                         .addBands(hii.rename("hii"))
                         .addBands(tri.rename("tri"))
                         .addBands(distance_to_roads.rename("distance_to_roads"))
@@ -404,15 +489,27 @@ class SCLProbabilityCoefficients(SCLTask):
                         reducer=ee.Reducer.mean(),
                         scale=self.scale,
                         crs=self.crs,
+                        # tileScale=16,  # this causes an ee computation timeout error
                     )
                     self._df_covars = self.fc2df(covariates_fc)
 
                     if self._df_covars.empty:
-                        self._df_covars[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
-                        self._df_covars[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
+                        self._df_covars = pd.DataFrame(
+                            columns=[
+                                self.MASTER_GRID_LABEL,
+                                self.MASTER_CELL_LABEL,
+                                "structural_habitat",
+                                "hii",
+                                "tri",
+                                "distance_to_roads",
+                            ]
+                        )
                     else:
                         self._df_covars.rename(
-                            {"zone": self.MASTER_GRID_LABEL, "id": self.MASTER_CELL_LABEL},
+                            {
+                                "zone": self.MASTER_GRID_LABEL,
+                                "id": self.MASTER_CELL_LABEL,
+                            },
                             axis=1,
                             inplace=True,
                         )
@@ -706,13 +803,26 @@ class SCLProbabilityCoefficients(SCLTask):
             probs = self.predict_surface()
             print(probs)
             probs.to_csv(f"probs{self.zone}.csv")
-            # TODO: save probability and survey effort grids for this zone
-            # create df with mastergridcell, cond_psi, geo
-            # df_probability =
-            # create fc from df, then do reduceToImage/rename like below
-            # projects/SCL/v1/Panthera_tigris/canonical/probability_2 <- zone depends on how we decide to merge zones
-            # repeat for mastergridcell, ratio_psi, geo
-            print(f"Produced outputs for zone {self.zone}")
+            # probs = pd.read_csv(
+            #     f"probs{self.zone}.csv",
+            #     encoding="utf-8",
+            #     index_col=self.MASTER_CELL_LABEL,
+            # )
+
+            df_prob = pd.merge(
+                left=probs, right=self.df_covars, left_index=True, right_index=True
+            ).loc[:, ["cond_psi", "ratio_psi", ".geo"]]
+            df_prob.rename(
+                columns={".geo": "geom"}, inplace=True
+            )  # ee cannot handle geom label starting with '.'
+            df_prob["geom"] = df_prob["geom"].apply(lambda x: wkt.dumps(json.loads(x)))
+            fc_prob = self.df2fc(df_prob)
+
+            probzone = fc_prob.reduceToImage(["cond_psi"], ee.Reducer.max()).rename("probability")
+            self.export_image_ee(probzone, f"probability{self.zone}")
+            effortzone = fc_prob.reduceToImage(["ratio_psi"], ee.Reducer.max()).rename("effort")
+            self.export_image_ee(effortzone, f"effortzone{self.zone}")
+            print(f"Started image exports for zone {self.zone}")
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
@@ -753,8 +863,15 @@ class SCLProbabilityCoefficients(SCLTask):
             return
 
         if self.fc_csvs:
-            for csv in self.fc_csvs:
-                Path(csv).unlink()
+            for csv, table_asset_id in self.fc_csvs:
+                if csv and Path(csv).exists():
+                    Path(csv).unlink()
+                if table_asset_id:
+                    try:
+                        asset = ee.data.getAsset(table_asset_id)
+                        ee.data.deleteAsset(table_asset_id)
+                    except ee.ee_exception.EEException:
+                        print(f"{table_asset_id} does not exist; skipping")
 
 
 if __name__ == "__main__":
