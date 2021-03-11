@@ -472,7 +472,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
                 structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
                 hii, hii_date = self.get_most_recent_image(hii_ic)
-                distance_to_roads = roads.distance().clipToCollection(self.gridcells)
+                distance_to_roads = roads.distance().clipToCollection(ee.FeatureCollection(self.zones.geometry()))
 
                 if structural_habitat and hii:
                     covariates_bands = (
