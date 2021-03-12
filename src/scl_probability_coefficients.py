@@ -476,10 +476,9 @@ class SCLProbabilityCoefficients(SCLTask):
 
                 if structural_habitat and hii:
                     covariates_bands = (
-                        # updateMask(hii) just eliminates water Nones
                         structural_habitat.rename("structural_habitat")
                         .unmask(0)
-                        .updateMask(hii)
+                        .clipToCollection(ee.FeatureCollection(self.zones.geometry()))
                         .addBands(hii.rename("hii"))
                         .addBands(tri.rename("tri"))
                         .addBands(distance_to_roads.rename("distance_to_roads"))
