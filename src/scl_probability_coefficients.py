@@ -76,7 +76,7 @@ class SCLProbabilityCoefficients(SCLTask):
         },
         "gridcells": {
             "ee_type": SCLTask.FEATURECOLLECTION,
-            "ee_path": "projects/SCL/v1/Panthera_tigris/gridcells",
+            "ee_path": "projects/SCL/v1/Panthera_tigris/covar_gridcells",
             "static": True,
         },
     }
@@ -206,25 +206,27 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def _find_master_grid_cell(self, obs_feature):
         centroid = obs_feature.centroid().geometry()
-        # matching_zones = self.zones.filterBounds(centroid)
         intersects = ee.Filter.intersects(".geo", None, ".geo")
         matching_zones = ee.Join.simple().apply(self.zones, obs_feature, intersects)
         zone_id_true = ee.Number(matching_zones.first().get(self.ZONES_LABEL))
-        zone_id_false = ee.Number(self.EE_NODATA)
+        id_false = ee.Number(self.EE_NODATA)
         zone_id = ee.Number(
-            ee.Algorithms.If(matching_zones.size().gte(1), zone_id_true, zone_id_false)
+            ee.Algorithms.If(matching_zones.size().gte(1), zone_id_true, id_false)
         )
 
+        matching_gridcells = self.gridcells.filter(
+            ee.Filter.eq("zone", zone_id)
+        ).filterBounds(centroid)
         gridcell_id_true = ee.Number(
-            self.gridcells.filter(ee.Filter.eq("zone", zone_id))
-            .filterBounds(centroid)
-            .first()
-            .get(self.MASTER_CELL_ID_LABEL)
+            matching_gridcells.first().get(self.MASTER_CELL_ID_LABEL)
         )
-        gridcell_id_false = ee.Number(self.EE_NODATA)
         gridcell_id = ee.Number(
             ee.Algorithms.If(
-                zone_id.neq(self.EE_NODATA), gridcell_id_true, gridcell_id_false
+                zone_id.neq(self.EE_NODATA),
+                ee.Algorithms.If(
+                    matching_gridcells.size().gte(1), gridcell_id_true, id_false
+                ),
+                id_false,
             )
         )
 
@@ -302,7 +304,9 @@ class SCLProbabilityCoefficients(SCLTask):
             self._remove_from_cloudstorage(f"{blob}.csv")
         return df
 
-    def df2fc(self, df: pd.DataFrame, geofield: str = "geom") -> Optional[ee.FeatureCollection]:
+    def df2fc(
+        self, df: pd.DataFrame, geofield: str = "geom"
+    ) -> Optional[ee.FeatureCollection]:
         tempfile = str(uuid.uuid4())
         blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
         if df.empty:
@@ -472,7 +476,9 @@ class SCLProbabilityCoefficients(SCLTask):
 
                 structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
                 hii, hii_date = self.get_most_recent_image(hii_ic)
-                distance_to_roads = roads.distance().clipToCollection(ee.FeatureCollection(self.zones.geometry()))
+                distance_to_roads = roads.distance().clipToCollection(
+                    ee.FeatureCollection(self.zones.geometry())
+                )
 
                 if structural_habitat and hii:
                     covariates_bands = (
@@ -565,12 +571,9 @@ class SCLProbabilityCoefficients(SCLTask):
         #  self.presence_covar.columns + self.po_detection_covars.columns
         #  assuming those dfs are formatted correctly (see note in calc())
         param_guess = np.zeros(len(param_names))
-        
+
         fit_pbso = minimize(
-            self.neg_log_likelihood_int,
-            param_guess,
-            method="BFGS",
-            options={"gtol": 1},
+            self.neg_log_likelihood_int, param_guess, method="BFGS", options={"gtol": 1}
         )
         se_pbso = np.zeros(len(fit_pbso.x))
         # TODO: Output Standard Error of parameter estimates when convergence occurs
@@ -817,9 +820,13 @@ class SCLProbabilityCoefficients(SCLTask):
             df_prob["geom"] = df_prob["geom"].apply(lambda x: wkt.dumps(json.loads(x)))
             fc_prob = self.df2fc(df_prob)
 
-            probzone = fc_prob.reduceToImage(["cond_psi"], ee.Reducer.max()).rename("probability")
+            probzone = fc_prob.reduceToImage(["cond_psi"], ee.Reducer.max()).rename(
+                "probability"
+            )
             self.export_image_ee(probzone, f"probability{self.zone}")
-            effortzone = fc_prob.reduceToImage(["ratio_psi"], ee.Reducer.max()).rename("effort")
+            effortzone = fc_prob.reduceToImage(["ratio_psi"], ee.Reducer.max()).rename(
+                "effort"
+            )
             self.export_image_ee(effortzone, f"effortzone{self.zone}")
             print(f"Started image exports for zone {self.zone}")
 
