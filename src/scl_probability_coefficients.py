@@ -68,8 +68,6 @@ class SCLProbabilityCoefficients(SCLTask):
 
         self.Nx = 0
         self.Nw = 0
-        # TODO: set these dynamically, right now assumes constant detection probability for sign survey and camera
-        #  trap data
         self.Npsign = 1
         self.NpCT = 1
         self.po_detection_covars = (
@@ -167,35 +165,72 @@ class SCLProbabilityCoefficients(SCLTask):
     @property
     def df_cameratrap(self):
         if self._df_ct is None:
-            self._df_ct = pd.merge(
-                left=self.df_cameratrap_dep,
-                right=self.df_cameratrap_obs,
-                left_index=True,
-                right_index=True,
-            )
-        return self._df_ct
+            _csvpath = "cameratrap.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_ct = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col="CameraTrapDeploymentID"
+                )
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
+                    f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
+                    f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
+                )
+                _df_ct_dep = self._get_df(query)
+                print("zonify camera trap deployments")
+                _df_ct_dep = self.zonify(_df_ct_dep)
+                _df_ct_dep.set_index("CameraTrapDeploymentID", inplace=True)
+
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
+                    f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= "
+                    f"{self.inputs['obs_ct']['maxage']} "
+                    f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
+                )
+                _df_ct_obs = self._get_df(query)
+                # No location for CT observations, so no mastergridcell.
+                # TODO: eliminate duplicate observations with same dep id and timestamp
+                _df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
+                _df_ct_obs["detections"] = (
+                    _df_ct_obs["AdultMaleCount"]
+                    + _df_ct_obs["AdultFemaleCount"]
+                    + _df_ct_obs["AdultSexUnknownCount"]
+                    + _df_ct_obs["SubAdultCount"]
+                    + _df_ct_obs["YoungCount"]
+                )
+                # TODO: make sure zero observation deployments are included
+                self._df_ct = pd.merge(
+                    left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True
+                )
+                if self.save_cache and not self._df_ct.empty:
+                    self._df_ct.to_csv(_csvpath, encoding="utf-8")
+
+        return self._df_ct[self._df_ct[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
     @property
     def df_signsurvey(self):
         if self._df_ss is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
-                f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
-                f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ss = self._get_df(query)
-        return self._df_ss
+            _csvpath = "signsurvey.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_ss = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
+                )
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_SignSurveyObservation "
+                    f"WHERE DATEDIFF(YEAR, StartDate, '{self.taskdate}') <= {self.inputs['obs_ss']['maxage']} "
+                    f"AND StartDate <= Cast('{self.taskdate}' AS datetime) "
+                )
+                self._df_ss = self._get_df(query)
+                print("zonify sign survey")
+                self._df_ss = self.zonify(self._df_ss)
+                self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
+                # TODO: make sure each data frame has covariates by joining with cov df
 
-    def fc2df(self, featurecollection):
-        features = featurecollection.getInfo()["features"]
-        rows = []
-        for f in features:
-            attr = f["properties"]
-            rows.append(attr)
+                if self.save_cache and not self._df_ss.empty:
+                    self._df_ss.to_csv(_csvpath, encoding="utf-8")
 
-        df = pd.DataFrame(rows)
-        df.set_index(self.cell_label, inplace=True)
-        return df
+        return self._df_ss[self._df_ss[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
     def tri(self, dem, scale):
         neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
@@ -207,52 +242,84 @@ class SCLProbabilityCoefficients(SCLTask):
     # Currently this just gets the mean of each covariate within each grid cell (based on self.scale = 1km)
     # Probably we need more sophisticated covariate definitions (mode of rounded cell vals?)
     # or to sample using smaller gridcell geometries
-    def get_covariates(self, grid):
-        try:
-            cells = [ee.Feature(g[0], g[1]) for g in self.grids[grid]]
-        except KeyError:
-            raise KeyError(f"No grid {grid} in observations")
-        cell_features = ee.FeatureCollection(cells)
+    @property
+    def df_covars(self):
+        if self._df_covars is None:
+            _csvpath = "covars.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_covars = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
+                )
+            else:
+                sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
+                hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
+                tri = ee.Image(self.inputs["tri"]["ee_path"])
+                # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
+                roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
 
-        sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
-        hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
-        dem = ee.Image(self.inputs["dem"]["ee_path"])
-        # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
-        roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
+                structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
+                hii, hii_date = self.get_most_recent_image(hii_ic)
+                distance_to_roads = roads.distance().clipToCollection(
+                    ee.FeatureCollection(self.zones.geometry())
+                )
 
-        structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
-        hii, hii_date = self.get_most_recent_image(hii_ic)
-        tri = self.tri(dem, 90)
-        distance_to_roads = roads.distance().clipToCollection(cell_features)
+                if structural_habitat and hii:
+                    covariates_bands = (
+                        structural_habitat.rename("structural_habitat")
+                        .unmask(0)
+                        .clipToCollection(ee.FeatureCollection(self.zones.geometry()))
+                        .addBands(hii.rename("hii"))
+                        .addBands(tri.rename("tri"))
+                        .addBands(distance_to_roads.rename("distance_to_roads"))
+                    )
+                    covariates_fc = covariates_bands.reduceRegions(
+                        collection=self.gridcells,
+                        reducer=ee.Reducer.mean(),
+                        scale=self.scale,
+                        crs=self.crs,
+                        # tileScale=16,  # this causes an ee computation timeout error
+                    )
+                    self._df_covars = self.fc2df(covariates_fc)
 
-        if structural_habitat and hii:
-            covariates_bands = (
-                structural_habitat.rename("structural_habitat")
-                .addBands(hii.rename("hii"))
-                .addBands(tri.rename("tri"))
-                .addBands(distance_to_roads.rename("distance_to_roads"))
-            )
-            covariates_fc = covariates_bands.reduceRegions(
-                collection=cell_features,
-                reducer=ee.Reducer.mean(),
-                scale=self.scale,
-                crs=self.crs,
-            )
-            _df_covars = self.fc2df(covariates_fc)
+                    if self._df_covars.empty:
+                        self._df_covars = pd.DataFrame(
+                            columns=[
+                                self.MASTER_GRID_LABEL,
+                                self.MASTER_CELL_LABEL,
+                                "structural_habitat",
+                                "hii",
+                                "tri",
+                                "distance_to_roads",
+                            ]
+                        )
+                    else:
+                        self._df_covars.rename(
+                            {
+                                "zone": self.MASTER_GRID_LABEL,
+                                "id": self.MASTER_CELL_LABEL,
+                            },
+                            axis=1,
+                            inplace=True,
+                        )
+                        covar_stats = self._df_covars.describe()
+                        # TODO: need to change the logic for choosing which columns to modify.
+                        for col in covar_stats.columns:
+                             if not col.startswith("Unnamed"):
+                                 self._df_covars[col] = (
+                                     self._df_covars[col] - covar_stats[col]["mean"]
+                                 ) / covar_stats[col]["std"]
 
-            covar_stats = _df_covars.describe()
-            # TODO: add comment explaining why we're replacing raw covar values
-            # TODO: reexamine this when we figure out more sophisticated sampling -- maybe roll this into ee
-            for col in covar_stats.columns:
-                if not col.startswith("Unnamed"):
-                    _df_covars[col] = (
-                        _df_covars[col] - covar_stats[col]["mean"]
-                    ) / covar_stats[col]["std"]
+                    self._df_covars = self._df_covars.dropna()
+                    self._df_covars.set_index(self.MASTER_CELL_LABEL, inplace=True)
 
-            # TODO: check this -- means no row for any cell with ANY missing covars
-            return _df_covars.dropna()
-        else:
-            return None
+                    if self.save_cache and not self._df_covars.empty:
+                        self._df_covars.to_csv(_csvpath, encoding="utf-8")
+                else:
+                    return None
+
+        return self._df_covars[
+            self._df_covars[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
     def pbso_integrated(self):
         """Overall function for optimizing function.
@@ -271,8 +338,6 @@ class SCLProbabilityCoefficients(SCLTask):
         psign_names = []
         pcam_names = []
         if not self.df_adhoc.empty:
-            # TODO: set self.po_detection_covars and any other properties from __init__ so that code can run and
-            #  produce empty results (here we'd get `TypeError: 'NoneType' object is not iterable`)
             alpha_names = list(self.po_detection_covars)
             alpha_names[0] = "alpha0"
         if not self.df_signsurvey.empty:
@@ -281,9 +346,6 @@ class SCLProbabilityCoefficients(SCLTask):
             pcam_names = [f"p_cam_{i}" for i in range(0, self.NpCT)]
         param_names = beta_names + alpha_names + psign_names + pcam_names
 
-        # TODO: Should be able to remove the lines above and just get param_names from
-        #  self.presence_covar.columns + self.po_detection_covars.columns
-        #  assuming those dfs are formatted correctly (see note in calc())
         param_guess = np.zeros(len(param_names))
         
         fit_pbso = minimize(
@@ -293,9 +355,9 @@ class SCLProbabilityCoefficients(SCLTask):
             options={"gtol": 1},
         )
         se_pbso = np.zeros(len(fit_pbso.x))
-        # TODO: Output Standard Error of parameter estimates when convergence occurs
-        # if fit_pbso.success==True:
-        #    se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
+        # TODO: Output Standard Error of parameter estimates when convergence occurs, catch errors
+        if fit_pbso.success==True:
+            se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
         tmp = {
             "Parameter name": param_names,
             "Value": fit_pbso.x,
@@ -312,8 +374,6 @@ class SCLProbabilityCoefficients(SCLTask):
         }
         return p
 
-    # TODO: refactor par to use self.df_covars?
-    # TODO: make sure neg_log_likelihood can account for no adhoc data
     def neg_log_likelihood_int(self, par):
         """Calculates the negative log-likelihood of the function.
          Par: array list of parameters to optimize
@@ -354,8 +414,8 @@ class SCLProbabilityCoefficients(SCLTask):
             for i in ct_ids:
                 try:
                     self.df_zeta.loc[
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
-                            "GridCellCode"
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                            self.MASTER_CELL_LABEL  
                         ].values[0],
                         "zeta1",
                     ] += (
@@ -378,7 +438,7 @@ class SCLProbabilityCoefficients(SCLTask):
                     print("missing camera trap grid cell")
 
             known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
-                "GridCellCode"
+                self.MASTER_CELL_LABEL  
             ].tolist()
 
         # iterate over unique set of surveys, if there are sign survey data
