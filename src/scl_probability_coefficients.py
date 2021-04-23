@@ -22,7 +22,7 @@ class SCLProbabilityCoefficients(SCLTask):
             "maxage": 30,
         },
         "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
-        # TODO: replace with roads from OSM and calculate distance
+        # TODO: replace with roads from OSM and calculate distance (Kim 1)
         "roads": {
             "ee_type": SCLTask.FEATURECOLLECTION,
             "ee_path": "projects/Panthera-Earth-Engine/Roads/SouthAsiaRoads",
@@ -142,7 +142,7 @@ class SCLProbabilityCoefficients(SCLTask):
             self._df_ct_dep = self._get_df(query, "CameraTrapDeploymentID")
         return self._df_ct_dep
 
-    # TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime
+    # TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime (Kim 1)
     @property
     def df_cameratrap_obs(self):
         if self._df_ct_obs is None:
@@ -188,8 +188,8 @@ class SCLProbabilityCoefficients(SCLTask):
                     f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
                 )
                 _df_ct_obs = self._get_df(query)
-                # No location for CT observations, so no mastergridcell.
-                # TODO: eliminate duplicate observations with same dep id and timestamp
+
+
                 _df_ct_obs.set_index("CameraTrapDeploymentID", inplace=True)
                 _df_ct_obs["detections"] = (
                     _df_ct_obs["AdultMaleCount"]
@@ -198,7 +198,7 @@ class SCLProbabilityCoefficients(SCLTask):
                     + _df_ct_obs["SubAdultCount"]
                     + _df_ct_obs["YoungCount"]
                 )
-                # TODO: make sure zero observation deployments are included
+                # TODO: make sure zero observation deployments are included (Jamie 1)
                 self._df_ct = pd.merge(
                     left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True
                 )
@@ -225,7 +225,8 @@ class SCLProbabilityCoefficients(SCLTask):
                 print("zonify sign survey")
                 self._df_ss = self.zonify(self._df_ss)
                 self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
-                # TODO: make sure each data frame has covariates by joining with cov df
+                # TODO: make sure each data frame has covariates by joining with cov df, check after real data as a check
+                # to make sure all cells have covariate data, each dataframe check (Jamie 1)
 
                 if self.save_cache and not self._df_ss.empty:
                     self._df_ss.to_csv(_csvpath, encoding="utf-8")
@@ -254,7 +255,7 @@ class SCLProbabilityCoefficients(SCLTask):
                 sh_ic = ee.ImageCollection(self.inputs["structural_habitat"]["ee_path"])
                 hii_ic = ee.ImageCollection(self.inputs["hii"]["ee_path"])
                 tri = ee.Image(self.inputs["tri"]["ee_path"])
-                # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection
+                # TODO: when we have OSM, point to fc dir and implement get_most_recent_featurecollection (Kim 1)
                 roads = ee.FeatureCollection(self.inputs["roads"]["ee_path"])
 
                 structural_habitat, sh_date = self.get_most_recent_image(sh_ic)
@@ -302,7 +303,8 @@ class SCLProbabilityCoefficients(SCLTask):
                             inplace=True,
                         )
                         covar_stats = self._df_covars.describe()
-                        # TODO: need to change the logic for choosing which columns to modify.
+                        # TODO: need to change the logic for choosing which columns to modify. what is unnamed? 
+                        # (Jamie, Kim 3)
                         for col in covar_stats.columns:
                              if not col.startswith("Unnamed"):
                                  self._df_covars[col] = (
@@ -355,7 +357,8 @@ class SCLProbabilityCoefficients(SCLTask):
             options={"gtol": 1},
         )
         se_pbso = np.zeros(len(fit_pbso.x))
-        # TODO: Output Standard Error of parameter estimates when convergence occurs, catch errors
+        # TODO: Output Standard Error of parameter estimates when convergence occurs, catch errors (Jamie 1)
+        # Jamie will catch errors, Kim will handle what to do afterwards
         if fit_pbso.success==True:
             se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
         tmp = {
@@ -363,7 +366,7 @@ class SCLProbabilityCoefficients(SCLTask):
             "Value": fit_pbso.x,
             "Standard error": se_pbso[0],
         }
-        # TODO: continue improving variable readability...
+        # TODO: continue improving variable readability... (Jamie 3)
         p = {
             "coefs": pd.DataFrame(
                 tmp, columns=["Parameter name", "Value", "Standard error"]
@@ -383,15 +386,15 @@ class SCLProbabilityCoefficients(SCLTask):
         known_ct = []
         known_sign = []
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        # TODO: This should get initialized in __init__ so that predict_surface won't fail
+        # TODO: This should get initialized in __init__ so that predict_surface won't fail (Jamie 1)
         self.psi = 1.0 - np.exp(-lambda0)
         nll_po = 0
 
         zeta = np.empty((len(self.psi), 2))
         zeta[:, 0] = 1.0 - self.psi
-        # TODO: handle RuntimeWarning divide by zero with log
+        # TODO: handle RuntimeWarning divide by zero with log (Jamie 1)
         zeta[:, 1] = np.log(self.psi)
-        # TODO: same __init__ issue
+        # TODO: same __init__ issue (Jamie 1)
         self.df_zeta = pd.DataFrame(
             {"zeta0": zeta[:, 0], "zeta1": zeta[:, 1]},
             index=self.presence_covars.index.copy(),
@@ -486,6 +489,7 @@ class SCLProbabilityCoefficients(SCLTask):
         )
         self.df_zeta["lambda0"] = lambda0
 
+        # TODO: handle ad hoc with density>0 (Jamie 1), fields "density" and "standard_error"
         if not self.df_adhoc.empty:
             alpha = par[self.Nx : self.Nx + self.Nw]
             tw = np.dot(np.array(self.po_detection_covars), alpha)
@@ -564,7 +568,6 @@ class SCLProbabilityCoefficients(SCLTask):
             # )
 
             self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
-            # TODO: Can 'alpha' and 'beta' be added to these dfs here?
             self.po_detection_covars.insert(0, "Int", 1)
             self.presence_covars = df_covars[["structural_habitat", "hii"]]
             self.presence_covars.insert(0, "Int", 1)
@@ -574,7 +577,7 @@ class SCLProbabilityCoefficients(SCLTask):
             else:
                 self.Nw = 0
 
-            # TODO: set class properties instead of returning
+            # TODO: set class properties instead of returning (Jamie 2)
             m = self.pbso_integrated()
             print(m)
             probs = self.predict_surface()
@@ -608,7 +611,7 @@ class SCLProbabilityCoefficients(SCLTask):
             # )
             # self.export_image_ee(fake_prob, "hab/probability")
 
-        # TODO: add (? or otherwise combine) all probability images, one for each grid
+        # TODO: add (? or otherwise combine) all probability images, one for each grid (Kim, TBD)
         # self.export_image_ee(combined_images, "hab/probability")
 
     def check_inputs(self):
