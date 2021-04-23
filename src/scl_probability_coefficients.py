@@ -1,27 +1,63 @@
-import os
 import argparse
-import pyodbc
+import ee
+import os
+import re
+import subprocess
 import numpy as np
 import pandas as pd
+import pyodbc
+import time
+import uuid
+import json
+from datetime import datetime, timezone
+from typing import List, Optional, Union
+from geomet import wkt
+from google.cloud.storage import Client
+from google.cloud.exceptions import NotFound
+from pathlib import Path
 from scipy.optimize import minimize
 from scipy.special import expit
-import ee
-from datetime import datetime, timezone
 from task_base import SCLTask
-from geomet import wkt
+
+
+class ConversionException(Exception):
+    pass
 
 
 class SCLProbabilityCoefficients(SCLTask):
+    GRID_LABEL = "GridName"
+    CELL_LABEL = "GridCellCode"
+    MASTER_GRID_LABEL = "mastergrid"
+    MASTER_CELL_LABEL = "mastergridcell"
+    MASTER_CELL_ID_LABEL = "id"
+    POINT_LOC_LABEL = "PointLocation"
+    GRIDCELL_LOC_LABEL = "GridCellLocation"
+    ZONES_LABEL = "Biome_zone"
+    UNIQUE_ID_LABEL = "UniqueID"
+    EE_NODATA = -9999
+    BUCKET = "scl-pipeline"
+
+    MASTERGRID_DF_COLUMNS = [UNIQUE_ID_LABEL, MASTER_GRID_LABEL, MASTER_CELL_LABEL]
+
+    google_creds_path = "/.google_creds"
+    use_cache = True
+    save_cache = True  # only relevant when use_cache = False
     inputs = {
-        "obs_adhoc": {"maxage": 6},
-        "obs_ss": {"maxage": 6},
-        "obs_ct": {"maxage": 6},
+        "obs_adhoc": {"maxage": 50},
+        "obs_ss": {"maxage": 50},
+        "obs_ct": {"maxage": 50},
         "hii": {
             "ee_type": SCLTask.IMAGECOLLECTION,
             "ee_path": "projects/HII/v1/hii",
             "maxage": 30,
         },
-        "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
+        "tri": {
+            "ee_type": SCLTask.IMAGE,
+            "ee_path": "projects/SCL/v1/tri_aster",
+            "static": True,
+        },
+        # original dynamic calculation of tri from this dem using method below
+        # "dem": {"ee_type": SCLTask.IMAGE, "ee_path": "CGIAR/SRTM90_V4", "static": True},
         # TODO: replace with roads from OSM and calculate distance (Kim 1)
         "roads": {
             "ee_type": SCLTask.FEATURECOLLECTION,
@@ -30,18 +66,23 @@ class SCLProbabilityCoefficients(SCLTask):
         },
         "structural_habitat": {
             "ee_type": SCLTask.IMAGECOLLECTION,
-            "ee_path": f"projects/SCL/v1/Panthera_tigris/structural_habitat",
+            "ee_path": "projects/SCL/v1/Panthera_tigris/canonical/structural_habitat",
             "maxage": 10,  # until we have full-range SH for every year
         },
+        "zones": {
+            "ee_type": SCLTask.FEATURECOLLECTION,
+            "ee_path": "projects/SCL/v1/Panthera_tigris/zones",
+            "static": True,
+        },
+        "gridcells": {
+            "ee_type": SCLTask.FEATURECOLLECTION,
+            "ee_path": "projects/SCL/v1/Panthera_tigris/covar_gridcells",
+            "static": True,
+        },
     }
-    grid_label = "GridName"
-    cell_label = "GridCellCode"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.set_aoi_from_ee(
-            "projects/SCL/v1/Panthera_tigris/sumatra_poc_aoi"
-        )  # temporary
 
         try:
             self.OBSDB_HOST = os.environ["OBSDB_HOST"]
@@ -58,47 +99,233 @@ class SCLProbabilityCoefficients(SCLTask):
         )
         self.obsconn = pyodbc.connect(_obsconn_str)
 
+        # Set up google cloud credentials separate from ee creds
+        creds_path = Path(self.google_creds_path)
+        if creds_path.exists() is False:
+            with open(str(creds_path), "w") as f:
+                f.write(self.service_account_key)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
+
+        self._zone_ids = []
         self._grids = {}
-        self._gridname = None
         self._df_adhoc = None
-        self._df_ct_dep = None
-        self._df_ct_obs = None
         self._df_ct = None
         self._df_ss = None
-
+        self._df_covars = None
+        self.zone = None
         self.Nx = 0
         self.Nw = 0
+        # TODO: set these dynamically; right now assumes constant detection probability for SS/CT data
         self.Npsign = 1
         self.NpCT = 1
-        self.po_detection_covars = (
-            None
-        )  # coefficients relevant to presence-only and background detection only
-        self.presence_covars = (
-            None
-        )  # coefficients relevant to occupancy, shared across models
+        # coefficients relevant to presence-only and background detection only
+        self.po_detection_covars = None
+        # coefficients relevant to occupancy, shared across models
+        self.presence_covars = None
 
-    def _reset_df_caches(self):
-        self._df_adhoc = None
-        self._df_ct_dep = None
-        self._df_ct_obs = None
-        self._df_ct = None
-        self._df_ss = None
+        self.zones = ee.FeatureCollection(self.inputs["zones"]["ee_path"])
+        self.gridcells = ee.FeatureCollection(self.inputs["gridcells"]["ee_path"])
+        self.fc_csvs = []
 
-    def _get_df(self, query, index_field=cell_label):
+    def _download_from_cloudstorage(self, blob_path: str, local_path: str) -> str:
+        client = Client()
+        bucket = client.get_bucket(self.BUCKET)
+        blob = bucket.blob(blob_path)
+        blob.download_to_filename(local_path)
+        return local_path
 
+    def _upload_to_cloudstorage(self, local_path: str, blob_path: str) -> str:
+        client = Client()
+        bucket = client.bucket(self.BUCKET)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(local_path, timeout=3600)
+        return blob_path
+
+    def _remove_from_cloudstorage(self, blob_path: str):
+        client = Client()
+        bucket = client.bucket(self.BUCKET)
+        try:  # don't fail entire task if this fails
+            bucket.delete_blob(blob_path)
+        except NotFound:
+            print(f"{blob_path} not found")
+
+    def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
+        if isinstance(output, bytes):
+            text = output.decode("utf-8")
+        else:
+            text = output
+
+        task_id_regex = re.compile(r"(?<=ID: ).*", flags=re.IGNORECASE)
+        try:
+            matches = task_id_regex.search(text)
+            if matches is None:
+                return None
+            return matches[0]
+        except TypeError:
+            return None
+
+    def _cp_storage_to_ee_table(
+        self, blob_uri: str, table_asset_id: str, geofield: str = "geom"
+    ) -> str:
+        try:
+            cmd = [
+                "/usr/local/bin/earthengine",
+                f"--service_account_file={self.google_creds_path}",
+                "upload table",
+                f"--primary_geometry_column {geofield}",
+                f"--asset_id={table_asset_id}",
+                blob_uri,
+            ]
+            output = subprocess.check_output(
+                " ".join(cmd), stderr=subprocess.STDOUT, shell=True
+            )
+            task_id = self._parse_task_id(output)
+            if task_id is None:
+                raise TypeError("task_id is None")
+            self.ee_tasks[task_id] = {}
+            return task_id
+        except subprocess.CalledProcessError as err:
+            raise ConversionException(err.stdout)
+
+    def _get_df(self, query):
         _scenario_clause = (
             f"AND ScenarioName IS NULL OR ScenarioName = '{self.CANONICAL}'"
         )
         if self.scenario and self.scenario != self.CANONICAL:
             _scenario_clause = f"AND ScenarioName = '{self.scenario}'"
 
-        query = f"{query}  {_scenario_clause}"
+        query = f"{query} {_scenario_clause}"
         df = pd.read_sql(query, self.obsconn)
-        df.set_index(index_field, inplace=True)
         return df
 
+    def _obs_feature(self, point_geom, gridcell_geom, id_label):
+        geom = gridcell_geom
+        if point_geom:
+            geom = point_geom
+        return ee.Feature(wkt.loads(geom), {self.UNIQUE_ID_LABEL: id_label})
+
+    def _find_master_grid_cell(self, obs_feature):
+        centroid = obs_feature.centroid().geometry()
+        intersects = ee.Filter.intersects(".geo", None, ".geo")
+        matching_zones = ee.Join.simple().apply(self.zones, obs_feature, intersects)
+        zone_id_true = ee.Number(matching_zones.first().get(self.ZONES_LABEL))
+        id_false = ee.Number(self.EE_NODATA)
+        zone_id = ee.Number(
+            ee.Algorithms.If(matching_zones.size().gte(1), zone_id_true, id_false)
+        )
+
+        matching_gridcells = self.gridcells.filter(
+            ee.Filter.eq("zone", zone_id)
+        ).filterBounds(centroid)
+        gridcell_id_true = ee.Number(
+            matching_gridcells.first().get(self.MASTER_CELL_ID_LABEL)
+        )
+        gridcell_id = ee.Number(
+            ee.Algorithms.If(
+                zone_id.neq(self.EE_NODATA),
+                ee.Algorithms.If(
+                    matching_gridcells.size().gte(1), gridcell_id_true, id_false
+                ),
+                id_false,
+            )
+        )
+
+        obs_feature = obs_feature.setMulti(
+            {self.MASTER_GRID_LABEL: zone_id, self.MASTER_CELL_LABEL: gridcell_id}
+        )
+
+        return obs_feature
+
+    # add "mastergrid" and "mastergridcell" to df
+    def zonify(self, df):
+        obs_features = ee.FeatureCollection(
+            [
+                self._obs_feature(o[0], o[1], o[2])
+                for o in zip(
+                    df[self.POINT_LOC_LABEL],
+                    df[self.GRIDCELL_LOC_LABEL],
+                    df[self.UNIQUE_ID_LABEL],
+                )
+                if (o[0] or o[1]) and o[2]
+            ]
+        )
+
+        return_obs_features = obs_features.map(self._find_master_grid_cell)
+        master_grid_df = self.fc2df(return_obs_features, self.MASTERGRID_DF_COLUMNS)
+        if master_grid_df.empty:
+            master_grid_df[self.UNIQUE_ID_LABEL] = pd.Series(dtype="object")
+            master_grid_df[self.MASTER_GRID_LABEL] = pd.Series(dtype="object")
+            master_grid_df[self.MASTER_CELL_LABEL] = pd.Series(dtype="object")
+
+        df = pd.merge(left=df, right=master_grid_df)
+
+        # save out non-intersecting observations
+        df_nonintersections = df[
+            (df[self.MASTER_GRID_LABEL] == self.EE_NODATA)
+            | (df[self.MASTER_CELL_LABEL] == self.EE_NODATA)
+        ]
+        if not df_nonintersections.empty:
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            df_nonintersections.to_csv(f"nonintersecting-{timestr}.csv")
+
+        # Filter out rows not in any zone and rows not in any gridcell (-9999)
+        df = df[
+            (df[self.MASTER_GRID_LABEL] != self.EE_NODATA)
+            & (df[self.MASTER_CELL_LABEL] != self.EE_NODATA)
+        ]
+
+        return df
+
+    def fc2df(self, featurecollection, columns=None):
+        df = pd.DataFrame()
+        fc_exists = False
+        try:
+            _fc_exists = featurecollection.first().getInfo()
+            fc_exists = True
+        except ee.ee_exception.EEException as e:
+            pass
+
+        if fc_exists:
+            tempfile = str(uuid.uuid4())
+            blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
+            task_id = self.export_fc_cloudstorage(
+                featurecollection, self.BUCKET, blob, "CSV", columns
+            )
+            self.wait()
+            csv = self._download_from_cloudstorage(f"{blob}.csv", f"{tempfile}.csv")
+            self.fc_csvs.append((f"{tempfile}.csv", None))
+
+            # uncomment to export shp for QA
+            # shp_task_id = self.export_fc_cloudstorage(
+            #     featurecollection, self.BUCKET, blob, "SHP", columns
+            # )
+
+            df = pd.read_csv(csv, encoding="utf-8")
+            self._remove_from_cloudstorage(f"{blob}.csv")
+        return df
+
+    def df2fc(
+        self, df: pd.DataFrame, geofield: str = "geom"
+    ) -> Optional[ee.FeatureCollection]:
+        tempfile = str(uuid.uuid4())
+        blob = f"prob/{self.species}/{self.scenario}/{self.taskdate}/{tempfile}"
+        if df.empty:
+            return None
+
+        df.replace(np.inf, 0, inplace=True)
+        df.to_csv(f"{tempfile}.csv", encoding="utf-8")
+        self._upload_to_cloudstorage(f"{tempfile}.csv", f"{blob}.csv")
+        table_asset_name, table_asset_id = self._prep_asset_id(f"scratch/{tempfile}")
+        task_id = self._cp_storage_to_ee_table(
+            f"gs://{self.BUCKET}/{blob}.csv", table_asset_id, geofield
+        )
+        self.wait()
+        self._remove_from_cloudstorage(f"{blob}.csv")
+        self.fc_csvs.append((f"{tempfile}.csv", table_asset_id))
+        return ee.FeatureCollection(table_asset_id)
+
     @property
-    def grids(self):
+    def user_grids(self):
         if len(self._grids) < 1:
             gridnames = set(
                 self.df_adhoc["GridName"].unique().tolist()
@@ -116,51 +343,43 @@ class SCLProbabilityCoefficients(SCLTask):
                 df_gridcells = pd.read_sql(gridcells_query, self.obsconn)
                 gridcells_list = df_gridcells.values.tolist()
                 self._grids[gridname] = [
-                    (wkt.loads(g[1]), {self.cell_label: g[0]}) for g in gridcells_list
+                    (wkt.loads(g[1]), {self.CELL_LABEL: g[0]}) for g in gridcells_list
                 ]
         return self._grids
 
     @property
+    def zone_ids(self):
+        if len(self._zone_ids) < 1:
+            self._zone_ids = (
+                self.zones.aggregate_histogram(self.ZONES_LABEL).keys().getInfo()
+            )
+        return self._zone_ids
+
+    @property
     def df_adhoc(self):
         if self._df_adhoc is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_AdHocObservation "
-                f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
-                f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_adhoc = self._get_df(query)
-        return self._df_adhoc
+            _csvpath = "adhoc.csv"
+            if self.use_cache and Path(_csvpath).is_file():
+                self._df_adhoc = pd.read_csv(
+                    _csvpath, encoding="utf-8", index_col=self.MASTER_CELL_LABEL
+                )
+            else:
+                query = (
+                    f"SELECT * FROM dbo.vw_CI_AdHocObservation "
+                    f"WHERE DATEDIFF(YEAR, ObservationDate, '{self.taskdate}') <= {self.inputs['obs_adhoc']['maxage']} "
+                    f"AND ObservationDate <= Cast('{self.taskdate}' AS datetime) "
+                )
+                self._df_adhoc = self._get_df(query)
+                print("zonify adhoc")
+                self._df_adhoc = self.zonify(self._df_adhoc)
+                self._df_adhoc.set_index(self.MASTER_CELL_LABEL, inplace=True)
 
-    @property
-    def df_cameratrap_dep(self):
-        if self._df_ct_dep is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_CameraTrapDeployment "
-                f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ct_dep = self._get_df(query, "CameraTrapDeploymentID")
-        return self._df_ct_dep
+                if self.save_cache and not self._df_adhoc.empty:
+                    self._df_adhoc.to_csv(_csvpath, encoding="utf-8")
 
-    # TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime (Kim 1)
-    @property
-    def df_cameratrap_obs(self):
-        if self._df_ct_obs is None:
-            query = (
-                f"SELECT * FROM dbo.vw_CI_CameraTrapObservation "
-                f"WHERE DATEDIFF(YEAR, ObservationDateTime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
-                f"AND ObservationDateTime <= Cast('{self.taskdate}' AS datetime) "
-            )
-            self._df_ct_obs = self._get_df(query, "CameraTrapDeploymentID")
-            self._df_ct_obs["detections"] = (
-                self._df_ct_obs["AdultMaleCount"]
-                + self._df_ct_obs["AdultFemaleCount"]
-                + self._df_ct_obs["AdultSexUnknownCount"]
-                + self._df_ct_obs["SubAdultCount"]
-                + self._df_ct_obs["YoungCount"]
-            )
-
-        return self._df_ct_obs
+        return self._df_adhoc[
+            self._df_adhoc[self.MASTER_GRID_LABEL].astype(str) == self.zone
+        ]
 
     @property
     def df_cameratrap(self):
@@ -176,6 +395,7 @@ class SCLProbabilityCoefficients(SCLTask):
                     f"WHERE DATEDIFF(YEAR, PickupDatetime, '{self.taskdate}') <= {self.inputs['obs_ct']['maxage']} "
                     f"AND PickupDatetime <= Cast('{self.taskdate}' AS datetime) "
                 )
+				# TODO: modify DB query to only select unique observations for each CameraTrapDeploymentID AND ObservationDateTime (Kim 1)
                 _df_ct_dep = self._get_df(query)
                 print("zonify camera trap deployments")
                 _df_ct_dep = self.zonify(_df_ct_dep)
@@ -233,14 +453,13 @@ class SCLProbabilityCoefficients(SCLTask):
 
         return self._df_ss[self._df_ss[self.MASTER_GRID_LABEL].astype(str) == self.zone]
 
-    def tri(self, dem, scale):
-        neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
-        diff = dem.subtract(neighbors)
-        sq = diff.multiply(diff)
-        tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
-        return tri
+    # def tri(self, dem, scale):
+    #     neighbors = dem.neighborhoodToBands(ee.Kernel.square(1.5))
+    #     diff = dem.subtract(neighbors)
+    #     sq = diff.multiply(diff)
+    #     tri = sq.reduce("sum").sqrt().reproject(self.crs, None, scale)
+    #     return tri
 
-    # Currently this just gets the mean of each covariate within each grid cell (based on self.scale = 1km)
     # Probably we need more sophisticated covariate definitions (mode of rounded cell vals?)
     # or to sample using smaller gridcell geometries
     @property
@@ -349,12 +568,9 @@ class SCLProbabilityCoefficients(SCLTask):
         param_names = beta_names + alpha_names + psign_names + pcam_names
 
         param_guess = np.zeros(len(param_names))
-        
+
         fit_pbso = minimize(
-            self.neg_log_likelihood_int,
-            param_guess,
-            method="BFGS",
-            options={"gtol": 1},
+            self.neg_log_likelihood_int, param_guess, method="BFGS", options={"gtol": 1}
         )
         se_pbso = np.zeros(len(fit_pbso.x))
         # TODO: Output Standard Error of parameter estimates when convergence occurs, catch errors (Jamie 1)
@@ -413,7 +629,11 @@ class SCLProbabilityCoefficients(SCLTask):
                 ]
             )
 
-            ct_ids = list(self.df_cameratrap.UniqueID_y.unique())
+            # TODO: This seems ugly. See query refactoring note above; or, if we want to preserve the join within
+            #  pandas, maybe we can specify on the join using a class constant.
+            uniqueid_y = f"{self.UNIQUE_ID_LABEL}_y"
+            # ct_ids is a list of CT obs unique ids, not deployment ids
+            ct_ids = list(self.df_cameratrap[uniqueid_y].unique())
             for i in ct_ids:
                 try:
                     self.df_zeta.loc[
@@ -422,23 +642,24 @@ class SCLProbabilityCoefficients(SCLTask):
                         ].values[0],
                         "zeta1",
                     ] += (
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
                         p_cam[self.NpCT - 1]
                     ) + (
-                        self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "days"
                         ].values[0]
-                        - self.df_cameratrap[self.df_cameratrap["UniqueID_y"] == i][
+                        - self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
                         1.0 - p_cam[self.NpCT - 1]
                     )
-                except KeyError:
-                    print("missing camera trap grid cell")
+                except KeyError as e:
+                    # pass
+                    print(f"df_zeta has no row with {self.MASTER_CELL_LABEL} = {e}")
 
             known_ct = self.df_cameratrap[self.df_cameratrap["detections"] > 0][
                 self.MASTER_CELL_LABEL  
@@ -448,24 +669,24 @@ class SCLProbabilityCoefficients(SCLTask):
         if not self.df_signsurvey.empty:
             p_sign = expit(par[self.Nx + self.Nw : self.Nx + self.Nw + self.Npsign])
 
-            survey_ids = list(self.df_signsurvey.UniqueID.unique())
+            survey_ids = list(self.df_signsurvey[self.UNIQUE_ID_LABEL].unique())
             for j in survey_ids:
                 self.df_zeta.loc[
                     self.df_signsurvey.index[
-                        (self.df_signsurvey["UniqueID"] == j)
+                        (self.df_signsurvey[self.UNIQUE_ID_LABEL] == j)
                     ].tolist()[0],
                     "zeta1",
                 ] += (
-                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "detections"
                     ].values[0]
                 ) * np.log(
                     p_sign[self.Npsign - 1]
                 ) + (
-                    self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "NumberOfReplicatesSurveyed"
                     ].values[0]
-                    - self.df_signsurvey[self.df_signsurvey["UniqueID"] == j][
+                    - self.df_signsurvey[self.df_signsurvey[self.UNIQUE_ID_LABEL] == j][
                         "detections"
                     ].values[0]
                 ) * np.log(
@@ -510,6 +731,7 @@ class SCLProbabilityCoefficients(SCLTask):
 
         nll_so = -1.0 * sum(self.df_zeta["lik_so"])
 
+        # TODO: enhance prob calcs to incorporate observation age
         return nll_po + nll_so
 
     def predict_surface(self):
@@ -529,59 +751,81 @@ class SCLProbabilityCoefficients(SCLTask):
         return df_predictsurface
 
     def calc(self):
-        prob_images = []
+        # prob_images = []
+        for zone in self.zone_ids:
+            self.zone = zone  # all dataframes are filtered by this
+            self.Nx = 0
+            self.Nw = 0
+            # TODO: set these dynamically; right now assumes constant detection probability for SS/CT data
+            self.Npsign = 1
+            self.NpCT = 1
 
-        for gridname in self.grids.keys():
-            self._gridname = gridname
-            self._reset_df_caches()
-
-            # output empty dataframes to user, modify sign survey and camera trap number of parameters
             if self.df_adhoc.empty:
                 print(
-                    f"There are no adhoc data observations for grid {gridname} during this time period."
+                    f"No adhoc data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_adhoc']['maxage']} years prior to {self.taskdate}."
                 )
             if self.df_signsurvey.empty:
                 print(
-                    f"There are no sign survey data observations for grid {gridname} during this time period."
+                    f"No sign survey data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_ss']['maxage']} years prior to {self.taskdate}."
                 )
                 self.Npsign = 0
             if self.df_cameratrap.empty:
                 print(
-                    f"There are no camera trap data observations for grid {gridname} during this time period."
+                    f"No camera trap data observations for zone {self.zone} "
+                    f"in the {self.inputs['obs_ct']['maxage']} years prior to {self.taskdate}."
                 )
                 self.NpCT = 0
 
-            # print(self.df_adhoc)
-            # print(self.df_signsurvey)
-            # print(self.df_cameratrap_dep)
-            # print(self.df_cameratrap_obs)
-            # print(self.df_cameratrap)
-            self.df_cameratrap.to_csv("ct.csv", encoding="utf-8")
-            self.df_adhoc.to_csv("adhoc.csv", encoding="utf-8")
-            self.df_signsurvey.to_csv("signsurvey.csv", encoding="utf-8")
+            # We need observations from at least one observation type per zone
+            if self.df_signsurvey.empty and self.df_cameratrap.empty:
+                print(f"No structured data for zone {self.zone}")
+                continue
+            # TODO: ensure we have at least some structured data for every zone, and then uncomment these lines and
+            #  remove the preceding two, so that task fails if no structured data for ANY zone.
+            #     self.status = self.FAILED
+            #     raise NotImplementedError("Probability calculation without structured data is not defined.")
 
-            df_covars = self.get_covariates(gridname)
-            # print(df_covars)
-            df_covars.to_csv("covars.csv", encoding="utf-8")
-            # df_covars = pd.read_csv(
-            #    "covars.csv", encoding="utf-8", index_col=self.cell_label
-            # )
-
-            self.po_detection_covars = df_covars[["tri", "distance_to_roads"]]
+            self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
+            # TODO: Can 'alpha' and 'beta' be added to these dfs here?
             self.po_detection_covars.insert(0, "Int", 1)
-            self.presence_covars = df_covars[["structural_habitat", "hii"]]
+            self.presence_covars = self.df_covars[["structural_habitat", "hii"]]
             self.presence_covars.insert(0, "Int", 1)
             self.Nx = self.presence_covars.shape[1]
             if not self.df_adhoc.empty:
                 self.Nw = self.po_detection_covars.shape[1]
-            else:
-                self.Nw = 0
 
-            # TODO: set class properties instead of returning (Jamie 2)
+            # TODO: set class properties instead of returning
             m = self.pbso_integrated()
             print(m)
             probs = self.predict_surface()
             print(probs)
+            probs.to_csv(f"probs{self.zone}.csv")
+            # probs = pd.read_csv(
+            #     f"probs{self.zone}.csv",
+            #     encoding="utf-8",
+            #     index_col=self.MASTER_CELL_LABEL,
+            # )
+
+            df_prob = pd.merge(
+                left=probs, right=self.df_covars, left_index=True, right_index=True
+            ).loc[:, ["cond_psi", "ratio_psi", ".geo"]]
+            df_prob.rename(
+                columns={".geo": "geom"}, inplace=True
+            )  # ee cannot handle geom label starting with '.'
+            df_prob["geom"] = df_prob["geom"].apply(lambda x: wkt.dumps(json.loads(x)))
+            fc_prob = self.df2fc(df_prob)
+
+            probzone = fc_prob.reduceToImage(["cond_psi"], ee.Reducer.max()).rename(
+                "probability"
+            )
+            self.export_image_ee(probzone, f"probability{self.zone}")
+            effortzone = fc_prob.reduceToImage(["ratio_psi"], ee.Reducer.max()).rename(
+                "effort"
+            )
+            self.export_image_ee(effortzone, f"effortzone{self.zone}")
+            print(f"Started image exports for zone {self.zone}")
 
             # "Fake" probability used for 6/17/20 calcs -- not for production use
             # probcells = []
@@ -616,6 +860,21 @@ class SCLProbabilityCoefficients(SCLTask):
 
     def check_inputs(self):
         super().check_inputs()
+
+    def clean_up(self, **kwargs):
+        if self.status == self.FAILED:
+            return
+
+        if self.fc_csvs:
+            for csv, table_asset_id in self.fc_csvs:
+                if csv and Path(csv).exists():
+                    Path(csv).unlink()
+                if table_asset_id:
+                    try:
+                        asset = ee.data.getAsset(table_asset_id)
+                        ee.data.deleteAsset(table_asset_id)
+                    except ee.ee_exception.EEException:
+                        print(f"{table_asset_id} does not exist; skipping")
 
 
 if __name__ == "__main__":
