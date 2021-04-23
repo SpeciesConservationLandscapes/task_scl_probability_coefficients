@@ -417,6 +417,7 @@ class SCLProbabilityCoefficients(SCLTask):
                     + _df_ct_obs["SubAdultCount"]
                     + _df_ct_obs["YoungCount"]
                 )
+
                 # TODO: make sure zero observation deployments are included
                 self._df_ct = pd.merge(
                     left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True
