@@ -522,10 +522,9 @@ class SCLProbabilityCoefficients(SCLTask):
                             inplace=True,
                         )
                         covar_stats = self._df_covars.describe()
-                        # TODO: need to change the logic for choosing which columns to modify. what is unnamed? 
-                        # (Jamie, Kim 3)
+
                         for col in covar_stats.columns:
-                             if not col.startswith("Unnamed"):
+                             if col=="structural_habitat" or col=="hii" or col=="tri" or col=="distance_to_roads":
                                  self._df_covars[col] = (
                                      self._df_covars[col] - covar_stats[col]["mean"]
                                  ) / covar_stats[col]["std"]
