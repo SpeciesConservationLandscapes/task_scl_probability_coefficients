@@ -611,8 +611,12 @@ class SCLProbabilityCoefficients(SCLTask):
 
         zeta = np.empty((len(self.psi), 2))
         zeta[:, 0] = 1.0 - self.psi
-        # TODO: handle RuntimeWarning divide by zero with log (Jamie 1)
-        zeta[:, 1] = np.log(self.psi)
+
+        try:
+            zeta[:, 1] = np.log(self.psi)
+        except RuntimeWarning as e:
+            print("No worries, keep going: ",e)
+
         self.df_zeta = pd.DataFrame(
             {"zeta0": zeta[:, 0], "zeta1": zeta[:, 1]},
             index=self.presence_covars.index.copy(),
