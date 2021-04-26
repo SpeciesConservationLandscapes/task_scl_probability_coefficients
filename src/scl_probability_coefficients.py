@@ -122,6 +122,11 @@ class SCLProbabilityCoefficients(SCLTask):
         self.po_detection_covars = None
         # coefficients relevant to occupancy, shared across models
         self.presence_covars = None
+        self.psi = []
+        self.df_zeta = pd.DataFrame(
+            columns = ["zeta0","zeta1"],
+            index = None
+        )
 
         self.zones = ee.FeatureCollection(self.inputs["zones"]["ee_path"])
         self.gridcells = ee.FeatureCollection(self.inputs["gridcells"]["ee_path"])
@@ -601,7 +606,6 @@ class SCLProbabilityCoefficients(SCLTask):
         known_ct = []
         known_sign = []
         lambda0 = np.exp(np.dot(np.array(self.presence_covars), beta))
-        # TODO: This should get initialized in __init__ so that predict_surface won't fail (Jamie 1)
         self.psi = 1.0 - np.exp(-lambda0)
         nll_po = 0
 
@@ -609,7 +613,6 @@ class SCLProbabilityCoefficients(SCLTask):
         zeta[:, 0] = 1.0 - self.psi
         # TODO: handle RuntimeWarning divide by zero with log (Jamie 1)
         zeta[:, 1] = np.log(self.psi)
-        # TODO: same __init__ issue (Jamie 1)
         self.df_zeta = pd.DataFrame(
             {"zeta0": zeta[:, 0], "zeta1": zeta[:, 1]},
             index=self.presence_covars.index.copy(),
