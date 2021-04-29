@@ -423,10 +423,11 @@ class SCLProbabilityCoefficients(SCLTask):
                     + _df_ct_obs["SubAdultCount"]
                     + _df_ct_obs["YoungCount"]
                 )
-                # TODO: make sure zero observation deployments are included (Jamie 1)
+
                 self._df_ct = pd.merge(
-                    left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True
+                    left=_df_ct_dep, right=_df_ct_obs, left_index=True, right_index=True, how='left'
                 )
+                self._df_ct['detections'].fillna(0, inplace=True)
                 if self.save_cache and not self._df_ct.empty:
                     self._df_ct.to_csv(_csvpath, encoding="utf-8")
 
@@ -637,27 +638,27 @@ class SCLProbabilityCoefficients(SCLTask):
 
             # TODO: This seems ugly. See query refactoring note above; or, if we want to preserve the join within
             #  pandas, maybe we can specify on the join using a class constant.
-            uniqueid_y = f"{self.UNIQUE_ID_LABEL}_y"
+            uniqueid_x = f"{self.UNIQUE_ID_LABEL}_x"
             # ct_ids is a list of CT obs unique ids, not deployment ids
-            ct_ids = list(self.df_cameratrap[uniqueid_y].unique())
+            ct_ids = list(self.df_cameratrap[uniqueid_x].unique())
             for i in ct_ids:
                 try:
                     self.df_zeta.loc[
-                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_x] == i][
                             self.MASTER_CELL_LABEL  
                         ].values[0],
                         "zeta1",
                     ] += (
-                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_x] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
                         p_cam[self.NpCT - 1]
                     ) + (
-                        self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                        self.df_cameratrap[self.df_cameratrap[uniqueid_x] == i][
                             "days"
                         ].values[0]
-                        - self.df_cameratrap[self.df_cameratrap[uniqueid_y] == i][
+                        - self.df_cameratrap[self.df_cameratrap[uniqueid_x] == i][
                             "detections"
                         ].values[0]
                     ) * np.log(
