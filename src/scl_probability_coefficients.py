@@ -581,11 +581,17 @@ class SCLProbabilityCoefficients(SCLTask):
         # TODO: Output Standard Error of parameter estimates when convergence occurs, catch errors (Jamie 1)
         # Jamie will catch errors, Kim will handle what to do afterwards
         if fit_pbso.success==True:
-            se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
+            try:
+                se_pbso = np.sqrt(np.diag(fit_pbso.hess_inv))
+            except:
+                print("There was an error with the Hessian matrix when computing standard errors of parameter estimates.")
+                se_pbso = np.zeros(len(fit_pbso.x))
+        else:
+            print("Convergence did not occur!")
         tmp = {
             "Parameter name": param_names,
             "Value": fit_pbso.x,
-            "Standard error": se_pbso[0],
+            "Standard error": se_pbso,
         }
         # TODO: continue improving variable readability... (Jamie 3)
         p = {
