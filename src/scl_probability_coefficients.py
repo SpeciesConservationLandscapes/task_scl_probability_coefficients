@@ -451,8 +451,6 @@ class SCLProbabilityCoefficients(SCLTask):
                 print("zonify sign survey")
                 self._df_ss = self.zonify(self._df_ss)
                 self._df_ss.set_index(self.MASTER_CELL_LABEL, inplace=True)
-                # TODO: make sure each data frame has covariates by joining with cov df, check after real data as a check
-                # to make sure all cells have covariate data, each dataframe check (Jamie 1)
 
                 if self.save_cache and not self._df_ss.empty:
                     self._df_ss.to_csv(_csvpath, encoding="utf-8")
@@ -799,6 +797,47 @@ class SCLProbabilityCoefficients(SCLTask):
             #  remove the preceding two, so that task fails if no structured data for ANY zone.
             #     self.status = self.FAILED
             #     raise NotImplementedError("Probability calculation without structured data is not defined.")
+
+            #check that covariate data exists for each data structure
+            # TODO: make sure task fails if no covariate data exists for any non empty data structure
+            if not self.df_adhoc.empty:
+                df_adhoc_covars = self.df_adhoc.join(self.df_covars[["tri", "distance_to_roads","structural_habitat", "hii"]])
+                _csvpath = "adhoc_covars.csv"
+                df_adhoc_covars.to_csv(_csvpath, encoding="utf-8")
+                if df_adhoc_covars[["tri", "distance_to_roads","structural_habitat", "hii"]].isnull().values.any()==True:
+                    print(
+                        f"No habitat covariate data for at least one grid cell for adhoc data observations for zone {self.zone} "
+                    )
+                else:
+                    print(
+                        f"There are habitat covariate data for ALL grid cells for adhoc data observations for zone {self.zone} "
+                    )
+
+            if not self.df_signsurvey.empty:
+                df_signsurvey_covars = self.df_signsurvey.join(self.df_covars[["tri", "distance_to_roads","structural_habitat", "hii"]])
+                _csvpath = "signsurvey_covars.csv"
+                df_signsurvey_covars.to_csv(_csvpath, encoding="utf-8")
+                if df_signsurvey_covars[["tri", "distance_to_roads","structural_habitat", "hii"]].isnull().values.any()==True:
+                    print(
+                        f"No habitat covariate data for at least one grid cell for sign survey data observations for zone {self.zone} "
+                    )
+                else:
+                    print(
+                        f"There are habitat covariate data for ALL grid cells for sign survey data observations for zone {self.zone} "
+                    )
+
+            if not self.df_cameratrap.empty:
+                df_cameratrap_covars = self.df_cameratrap.join(self.df_covars[["tri", "distance_to_roads","structural_habitat", "hii"]])
+                _csvpath = "cameratrap_covars.csv"
+                df_cameratrap_covars.to_csv(_csvpath, encoding="utf-8")
+                if df_cameratrap_covars[["tri", "distance_to_roads","structural_habitat", "hii"]].isnull().values.any()==True:
+                    print(
+                        f"No habitat covariate data for at least one grid cell for camera trap data observations for zone {self.zone} "
+                    )
+                else:
+                    print(
+                        f"There are habitat covariate data for ALL grid cells for camera trap data observations for zone {self.zone} "
+                    )
 
             self.po_detection_covars = self.df_covars[["tri", "distance_to_roads"]]
             # TODO: Can 'alpha' and 'beta' be added to these dfs here?
